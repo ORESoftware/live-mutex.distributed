@@ -3,5 +3,6 @@
  */
 
 
-const Broker = require('../../broker');
+// legacy broker.ts removed; `Broker` is now an alias for Broker1
+const {Broker} = require('../../dist/main');
 const b = new Broker({});

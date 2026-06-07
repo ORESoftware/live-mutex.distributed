@@ -3,7 +3,8 @@ module.exports = data => {
     return {
         dependencies: {
             'Broker': function () {
-                return Promise.resolve().then(() => require('../../dist/broker')).then(v => v.default || v);
+                // legacy broker.ts removed; `Broker` is now Broker1
+                return Promise.resolve().then(() => require('../../dist/broker-1')).then(v => v.default || v);
             },
             'LvMtxClient': function () {
                 return Promise.resolve().then(() => require('../../dist/client')).then(v => v.default || v);

@@ -48,9 +48,9 @@
  * Wire-format invariant
  * ---------------------
  *
- * The string values below MUST match the legacy literals in
- * `broker.ts` / `broker-old.ts` / `client.ts` byte-for-byte. Mixed
- * `Broker1` / older-broker deployments need to interop, and any
+ * The string values below MUST match the historical wire literals in
+ * `broker-1.ts` / `client.ts` byte-for-byte (these are unchanged from the
+ * now-removed legacy `broker.ts`). Mixed `Broker1` / older deployments and any
  * external consumer that raw-JSON-encodes its requests (e.g. a
  * shell script piping into `nc`, a non-LMX language client) has
  * been writing those exact strings for years.
