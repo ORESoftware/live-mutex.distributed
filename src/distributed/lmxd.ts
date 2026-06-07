@@ -10,6 +10,9 @@
 
 import * as readline from 'readline';
 import {LMXDistributedNode} from './transport';
+import {Composite} from './composite';
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 function main(): void {
   const argv = process.argv.slice(2);
@@ -25,12 +28,59 @@ function main(): void {
   }
 
   const node = new LMXDistributedNode(id, addresses);
-  node.on('acquired', (lock: string, fence: number) => console.log(`ACQUIRED ${lock} fence=${fence}`));
+
+  // Optional self-test workload (LMX_DEMO=1): every node repeatedly acquires the
+  // SAME composite (multi-key) lock under contention, so logs show exclusive
+  // handoff across peers with strictly-increasing per-key fences.
+  const demoEnabled = !!process.env.LMX_DEMO && process.env.LMX_DEMO !== '0';
+  const demoKeys = (process.env.LMX_DEMO_KEYS || 'cap,mid,zed')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  let current: Composite | null = null;
+  let onHeld: (() => void) | null = null;
+
+  node.on('acquired', (lock: string, fence: number) => {
+    console.log(`ACQUIRED ${lock} fence=${fence}`);
+    if (!current) {
+      return;
+    }
+    const p = current.onAcquired(lock, fence);
+    if (p.kind === 'next') {
+      node.acquire(p.key);
+    } else if (p.kind === 'held') {
+      const parts = current.keys.map((k) => `${k}=${current!.fence(k)}`).join(', ');
+      console.log(`DEMO COMPOSITE HELD [${parts}]`);
+      onHeld?.();
+    }
+  });
   node.on('lost', (lock: string) => console.log(`LOST ${lock}`));
   node.on('info', (msg: string) => console.log(`# ${msg}`));
 
+  async function demoLoop(): Promise<void> {
+    for (;;) {
+      const c = Composite.create(demoKeys);
+      current = c;
+      const held = new Promise<void>((res) => {
+        onHeld = res;
+      });
+      node.acquire(c.pending()!);
+      await held;
+      onHeld = null;
+      await sleep(800);
+      for (const k of c.keys) {
+        node.release(k);
+      }
+      current = null;
+      await sleep(400);
+    }
+  }
+
   node.start().then(() => {
     console.log(`# node ${id} of ${addresses.length} started`);
+    if (demoEnabled) {
+      void demoLoop();
+    }
     const rl = readline.createInterface({input: process.stdin});
     rl.on('line', (line: string) => {
       const [cmd, lock] = line.trim().split(/\s+/);

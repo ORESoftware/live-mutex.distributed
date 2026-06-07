@@ -3,7 +3,7 @@
 import * as net from 'net';
 import {EventEmitter} from 'events';
 
-import {ConsensusMessage} from './messages';
+import {ConsensusMessage, isConsensusMessage} from './messages';
 import {LMXConsensusNode} from './node';
 import {Instant, LockId, NodeId} from './request-id';
 
@@ -185,8 +185,8 @@ export class LMXDistributedNode extends EventEmitter {
         }
         return;
       }
-      if (obj && typeof obj.type === 'string') {
-        this.node.handle(this.now(), peer, obj as ConsensusMessage);
+      if (isConsensusMessage(obj)) {
+        this.node.handle(this.now(), peer, obj);
         this.pump();
       }
     });
@@ -203,17 +203,27 @@ function parseAddr(addr: string): [string, number] {
  * Read newline-delimited JSON objects off a socket, buffering partial lines.
  * (The Broker1 integration will instead reuse the project's `createParser`.)
  */
+const MAX_JSON_FRAME = 1024 * 1024;
+
 function frameJsonLines(sock: net.Socket, onObj: (obj: any) => void): void {
   let buf = '';
   sock.setEncoding('utf8');
   sock.on('data', (chunk: string) => {
     buf += chunk;
+    if (buf.length > MAX_JSON_FRAME) {
+      sock.destroy();
+      return;
+    }
     let nl: number;
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
       if (line.length === 0) {
         continue;
+      }
+      if (line.length > MAX_JSON_FRAME) {
+        sock.destroy();
+        return;
       }
       try {
         onObj(JSON.parse(line));

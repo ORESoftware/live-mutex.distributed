@@ -57,3 +57,40 @@ export interface Acquired {
   readonly lock: LockId;
   readonly fence: Fence;
 }
+
+function isRecord(x: unknown): x is {[k: string]: unknown} {
+  return typeof x === 'object' && x !== null;
+}
+
+function isWholeNumber(x: unknown): x is number {
+  return typeof x === 'number' && Number.isFinite(x) && Number.isInteger(x) && x >= 0;
+}
+
+function isRequestId(x: unknown): x is RequestId {
+  return isRecord(x) && isWholeNumber(x.ts) && isWholeNumber(x.node);
+}
+
+function hasBaseShape(x: unknown): x is {type: ConsensusMsgType; lock: LockId; req: RequestId; fence?: Fence} {
+  return isRecord(x) && typeof x.type === 'string' && typeof x.lock === 'string' && isRequestId(x.req);
+}
+
+/** Runtime guard for untrusted transport payloads. */
+export function isConsensusMessage(x: unknown): x is ConsensusMessage {
+  if (!hasBaseShape(x)) {
+    return false;
+  }
+  switch (x.type) {
+    case ConsensusMsgType.Request:
+    case ConsensusMsgType.Inquire:
+    case ConsensusMsgType.Yield:
+    case ConsensusMsgType.Renew:
+    case ConsensusMsgType.Revoked:
+      return x.fence === undefined;
+    case ConsensusMsgType.Grant:
+    case ConsensusMsgType.Confirm:
+    case ConsensusMsgType.Release:
+      return isWholeNumber(x.fence);
+    default:
+      return false;
+  }
+}

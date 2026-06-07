@@ -6,6 +6,8 @@
 export {LMXConsensusNode} from './node';
 export {LMXDistributedNode} from './transport';
 export {Sim} from './sim';
+export {Composite, canonicalKeys, MAX_COMPOSITE_KEYS} from './composite';
+export type {CompositeError, CanonicalResult, Progress} from './composite';
 export {
   ConsensusMsgType,
   LEASE,

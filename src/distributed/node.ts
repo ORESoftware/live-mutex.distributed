@@ -7,6 +7,7 @@ import {
   LEASE,
   Outgoing,
   RENEW_INTERVAL,
+  isConsensusMessage,
 } from './messages';
 import {
   Fence,
@@ -112,6 +113,7 @@ export class LMXConsensusNode {
   private now: Instant = 0;
 
   constructor(id: NodeId, members: ReadonlyArray<NodeId>) {
+    validateMembers(id, members);
     this.id = id;
     this.members = members.slice();
     this.quorum = Math.floor(members.length / 2) + 1;
@@ -125,6 +127,9 @@ export class LMXConsensusNode {
   /** Begin acquiring `lock`; broadcasts a vote request to every member. */
   request(now: Instant, lock: LockId): void {
     this.now = now;
+    if (this.requester.has(lock)) {
+      return;
+    }
     const ts = this.lamportTick();
     const req: RequestId = {ts, node: this.id};
     this.requester.set(lock, {
@@ -156,6 +161,9 @@ export class LMXConsensusNode {
   /** Feed an inbound message; `from` is the sender, `now` the current time. */
   handle(now: Instant, from: NodeId, msg: ConsensusMessage): void {
     this.now = now;
+    if (!isConsensusMessage(msg) || !this.validInbound(from, msg)) {
+      return;
+    }
     switch (msg.type) {
       case ConsensusMsgType.Request:
         return this.onRequest(msg.lock, msg.req);
@@ -186,15 +194,19 @@ export class LMXConsensusNode {
     this.now = now;
 
     // Arbiter role: reclaim any votee whose lease lapsed.
+    const revoked: Array<{to: NodeId; lock: LockId; req: RequestId}> = [];
     const grants: Array<{lock: LockId; g: GrantOut}> = [];
     for (const [lock, a] of this.arbiter) {
       if (a.votedFor !== null && now >= a.lease) {
-        a.inquired = false;
+        revoked.push({to: a.votedFor.node, lock, req: a.votedFor});
         const g = grantNext(a, now);
         if (g) {
           grants.push({lock, g});
         }
       }
+    }
+    for (const {to, lock, req} of revoked) {
+      this.send(to, {type: ConsensusMsgType.Revoked, lock, req});
     }
     for (const {lock, g} of grants) {
       this.send(g.to, {type: ConsensusMsgType.Grant, lock, req: g.req, fence: g.fence});
@@ -251,6 +263,30 @@ export class LMXConsensusNode {
 
   private send(to: NodeId, msg: ConsensusMessage): void {
     this.outbox.push({to, msg});
+  }
+
+  private isMember(id: NodeId): boolean {
+    return this.members.indexOf(id) >= 0;
+  }
+
+  private validInbound(from: NodeId, msg: ConsensusMessage): boolean {
+    if (!this.isMember(from) || !this.isMember(msg.req.node)) {
+      return false;
+    }
+    switch (msg.type) {
+      case ConsensusMsgType.Request:
+      case ConsensusMsgType.Yield:
+      case ConsensusMsgType.Confirm:
+      case ConsensusMsgType.Release:
+      case ConsensusMsgType.Renew:
+        return from === msg.req.node;
+      case ConsensusMsgType.Grant:
+      case ConsensusMsgType.Inquire:
+      case ConsensusMsgType.Revoked:
+        return msg.req.node === this.id;
+      default:
+        return assertNever(msg);
+    }
   }
 
   // ---- arbiter role ----------------------------------------------------
@@ -404,7 +440,11 @@ export class LMXConsensusNode {
     }
     r.votes.delete(from);
     if (r.locked && r.votes.size < this.quorum) {
-      r.locked = false;
+      this.requester.delete(lock);
+      const fence = r.bestFence;
+      for (const m of this.members) {
+        this.send(m, {type: ConsensusMsgType.Release, lock, req: r.req, fence});
+      }
       this.lostLocks.push(lock);
     }
   }
@@ -416,6 +456,7 @@ export class LMXConsensusNode {
  * and returns the grant to send.
  */
 function grantNext(a: ArbiterState, now: Instant): GrantOut | null {
+  a.inquired = false;
   const next = a.queue.popMin();
   if (next === undefined) {
     a.votedFor = null;
@@ -428,4 +469,26 @@ function grantNext(a: ArbiterState, now: Instant): GrantOut | null {
 
 function assertNever(x: never): never {
   throw new Error(`unreachable consensus message: ${JSON.stringify(x)}`);
+}
+
+function validateMembers(id: NodeId, members: ReadonlyArray<NodeId>): void {
+  if (!Number.isInteger(id) || id < 0) {
+    throw new Error('node id must be a non-negative integer');
+  }
+  if (members.length === 0) {
+    throw new Error('members must not be empty');
+  }
+  const seen = new Set<NodeId>();
+  for (const m of members) {
+    if (!Number.isInteger(m) || m < 0) {
+      throw new Error('members must be non-negative integers');
+    }
+    if (seen.has(m)) {
+      throw new Error('members must be unique');
+    }
+    seen.add(m);
+  }
+  if (!seen.has(id)) {
+    throw new Error('members must include the local node id');
+  }
 }
