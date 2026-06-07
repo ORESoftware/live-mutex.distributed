@@ -20,6 +20,8 @@ Rust and Java.
 | Java 17+    | `clients/java`      | ✅      | ✅      | ✅              | ✅           | `mvn -q exec:java` |
 | C++17       | `clients/cpp`       | ✅      | ✅      | ✅              | ✅           | `make run` / `make test` |
 | Gleam       | `clients/gleam`     | ✅      | ✅      | ✅              | ✅           | `LIVE_MUTEX_SMOKE=1 gleam test` |
+| Shell       | `clients/shell`     | ✅      | ✅      | ✅              | ✅           | `./clients/shell/smoke.sh` |
+| PowerShell  | `clients/powershell`| ✅      | ✅      | ✅              | ✅           | `pwsh ./clients/powershell/smoke.ps1` |
 | TypeScript  | `src/client.ts`     | ✅      | ✅      | ✅              | ✅           | `npm test` |
 
 All clients implement at minimum:
