@@ -119,6 +119,7 @@ export interface LMXClientLockOpts {
   max?: number,
   maxRead?: number, // max concurrent readers (for RW locks)
   maxWrite?: number, // max concurrent writers (for RW locks)
+  wait?: boolean,
   retry?: boolean,
   maxRetry?: number,
   retryMax?: number,
@@ -1191,7 +1192,7 @@ export class Client {
     }
     
     const rwStatus = opts.rwStatus || null;
-    const max = opts.max;
+    const max = opts.max || opts.semaphore;
     
     let timedOut = false;
     
@@ -1359,13 +1360,17 @@ export class Client {
       
       this.write({
         keepLocksAfterDeath,
+        force: opts.force,
+        wait: opts.wait,
         retryCount,
         uuid: uuid,
         key: key,
         type: LMXRequestType.Lock,
         ttl: ttl,
         rwStatus,
-        max
+        max,
+        maxRead: opts.maxRead,
+        maxWrite: opts.maxWrite
       });
     }
     

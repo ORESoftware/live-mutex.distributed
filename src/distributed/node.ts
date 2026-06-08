@@ -212,18 +212,31 @@ export class LMXConsensusNode {
       this.send(g.to, {type: ConsensusMsgType.Grant, lock, req: g.req, fence: g.fence});
     }
 
-    // Requester role: renew the votes we currently hold.
+    // Requester role: renew held votes, and re-broadcast any request still
+    // acquiring. Re-broadcasting recovers a Request lost while a link was
+    // churning (e.g. a rolling restart): receivers de-duplicate it and the
+    // RequestId is unchanged, so queue fairness is preserved. (A lost Grant
+    // self-heals separately via arbiter lease expiry.)
     const renews: Array<{to: NodeId; lock: LockId; req: RequestId}> = [];
+    const rebroadcasts: Array<{lock: LockId; req: RequestId}> = [];
     for (const [lock, r] of this.requester) {
-      if (r.votes.size > 0 && now >= r.nextRenew) {
+      if (now >= r.nextRenew) {
         r.nextRenew = now + RENEW_INTERVAL;
         for (const v of r.votes) {
           renews.push({to: v, lock, req: r.req});
+        }
+        if (!r.locked && r.votes.size < this.quorum) {
+          rebroadcasts.push({lock, req: r.req});
         }
       }
     }
     for (const {to, lock, req} of renews) {
       this.send(to, {type: ConsensusMsgType.Renew, lock, req});
+    }
+    for (const {lock, req} of rebroadcasts) {
+      for (const m of this.members) {
+        this.send(m, {type: ConsensusMsgType.Request, lock, req});
+      }
     }
   }
 

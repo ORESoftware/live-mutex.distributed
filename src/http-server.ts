@@ -42,6 +42,19 @@ import * as http from 'http';
 import {URL, URLSearchParams} from 'url';
 import {Broker1} from './broker-1';
 import {InProcessBridge} from './in-process-bridge';
+import {RWStatus} from './shared-internal';
+
+type RwReadHold = {
+    key: string;
+    lockUuid: string;
+    timer?: NodeJS.Timeout;
+};
+
+type RwWriteHold = {
+    key: string;
+    lockUuid: string;
+    timer?: NodeJS.Timeout;
+};
 
 export interface LMXHttpServerOpts {
     /// Port to listen on. Defaults to `LMX_HTTP_PORT` env or 6971.
@@ -64,6 +77,8 @@ export interface LMXHttpServerOpts {
 export class LMXHttpServer {
     private server: http.Server | null = null;
     private bridge: InProcessBridge | null = null;
+    private rwReadHolds = new Map<string, RwReadHold>();
+    private rwWriteHolds = new Map<string, RwWriteHold>();
     readonly broker: Broker1;
     readonly opts: Required<LMXHttpServerOpts>;
 
@@ -132,6 +147,7 @@ export class LMXHttpServer {
             await new Promise<void>(r => this.server!.close(() => r()));
             this.server = null;
         }
+        await this.releaseAllRwHolds();
         if (this.bridge) {
             this.bridge.shutdown();
             this.bridge = null;
@@ -172,10 +188,40 @@ export class LMXHttpServer {
             if (!body) return;
             return this.handleLock(body, res);
         }
+        if (method === 'POST' && (path === '/v1/semaphore' || path === '/v1/semaphore/acquire')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleSemaphore(body, res);
+        }
         if (method === 'POST' && path === '/v1/unlock') {
             const body = await this.readJsonBody(req, res);
             if (!body) return;
             return this.handleUnlock(body, res);
+        }
+        if (method === 'POST' && (path === '/v1/semaphore/release' || path === '/v1/semaphore/unlock')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleUnlock(body, res);
+        }
+        if (method === 'POST' && (path === '/v1/rw/read-lock' || path === '/v1/rw/read/acquire')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleRwReadLock(body, res);
+        }
+        if (method === 'POST' && (path === '/v1/rw/read-unlock' || path === '/v1/rw/read/release')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleRwReadUnlock(body, res);
+        }
+        if (method === 'POST' && (path === '/v1/rw/write-lock' || path === '/v1/rw/write/acquire')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleRwWriteLock(body, res);
+        }
+        if (method === 'POST' && (path === '/v1/rw/write-unlock' || path === '/v1/rw/write/release')) {
+            const body = await this.readJsonBody(req, res);
+            if (!body) return;
+            return this.handleRwWriteUnlock(body, res);
         }
         if (method === 'POST' && path === '/v1/acquire-many') {
             const body = await this.readJsonBody(req, res);
@@ -393,10 +439,18 @@ export class LMXHttpServer {
         if (!key) {
             return this.respondJson(res, 400, {error: '`key` is required and must be a string.'});
         }
+        const max = readPositiveIntegerAlias(body, ['max', 'cap', 'semaphore']);
+        if (max.error) {
+            return this.respondJson(res, 400, {error: max.error});
+        }
         const reply = await this.bridge!.lock({
             key,
-            ttl: Number.isInteger(body.ttl) ? body.ttl : null,
-            max: Number.isInteger(body.max) ? body.max : undefined,
+            ttl: readTtl(body),
+            max: max.value,
+            // HTTP requests are stateless. A contended request should
+            // return 409 instead of enqueueing a future broker grant
+            // that has no live HTTP response waiting for it.
+            wait: false,
         });
         // The broker's reply shape matches the TCP wire frame. Map
         // synchronously-rejected requests (validation errors, e.g.
@@ -409,15 +463,241 @@ export class LMXHttpServer {
                 error: reply.error,
             });
         }
+        if (reply.acquired !== true) {
+            return this.respondJson(res, 409, {
+                acquired: false,
+                key,
+                lockRequestCount: reply.lockRequestCount,
+            });
+        }
         return this.respondJson(res, 200, {
-            acquired: !!reply.acquired,
+            acquired: true,
             key,
             // The bridge's request uuid IS the lock-holder uuid; the
             // broker doesn't mint a separate one for single-key holds.
-            lockUuid: reply.acquired ? reply._bridgeRequestUuid : undefined,
+            lockUuid: reply._bridgeRequestUuid,
             fencingToken: reply.fencingToken,
             lockRequestCount: reply.lockRequestCount,
         });
+    }
+
+    private async handleSemaphore(body: any, res: http.ServerResponse): Promise<void> {
+        const routineId = 'ddl-routine-http-handleSemaphore-Px8';
+        routineEnter(routineId, "LMXHttpServer.handleSemaphore");
+        if (!Number.isInteger(body.max) && Number.isInteger(body.cap)) {
+            body = {...body, max: body.cap};
+        }
+        if (!Number.isInteger(body.max) && Number.isInteger(body.semaphore)) {
+            body = {...body, max: body.semaphore};
+        }
+        if (!Number.isInteger(body.max) || body.max < 2) {
+            return this.respondJson(res, 400, {
+                error: '`max`, `cap`, or `semaphore` must be an integer >= 2 for /v1/semaphore/acquire.',
+            });
+        }
+        return this.handleLock(body, res);
+    }
+
+    private async handleRwReadLock(body: any, res: http.ServerResponse): Promise<void> {
+        const routineId = 'ddl-routine-http-handleRwReadLock-X2f';
+        routineEnter(routineId, "LMXHttpServer.handleRwReadLock");
+        const key = typeof body.key === 'string' ? body.key : null;
+        if (!key) {
+            return this.respondJson(res, 400, {error: '`key` is required and must be a string.'});
+        }
+        const maxRead = readPositiveIntegerAlias(body, ['maxRead', 'max', 'cap']);
+        if (maxRead.error) {
+            return this.respondJson(res, 400, {error: maxRead.error});
+        }
+        const capacity = maxRead.value ?? 10;
+        const lck = this.broker.locks.get(key);
+        if (lck && lck.writerFlag) {
+            return this.respondJson(res, 409, {acquired: false, key, mode: 'read'});
+        }
+
+        const reply = await this.bridge!.lock({
+            key,
+            ttl: readTtl(body),
+            max: capacity,
+            // See Broker1's RW compatibility path: read holders use
+            // the regular holder map with a raised cap. Writers pass
+            // maxWrite=1 and set writerFlag while active.
+            maxWrite: capacity,
+            wait: false,
+        });
+
+        if (reply.acquired === false && typeof reply.error === 'string') {
+            return this.respondJson(res, 400, {acquired: false, key, mode: 'read', error: reply.error});
+        }
+        if (reply.acquired !== true) {
+            return this.respondJson(res, 409, {
+                acquired: false,
+                key,
+                mode: 'read',
+                lockRequestCount: reply.lockRequestCount,
+            });
+        }
+
+        try {
+            await this.bridge!.incrementReaders(key);
+        } catch (err) {
+            await this.bridge!.unlock({key, lockUuid: reply._bridgeRequestUuid}).catch(() => {});
+            return this.respondJson(res, 500, {
+                acquired: false,
+                key,
+                mode: 'read',
+                error: String((err as Error)?.message || err),
+            });
+        }
+
+        const lockUuid = reply._bridgeRequestUuid;
+        this.rwReadHolds.set(lockUuid, {
+            key,
+            lockUuid,
+            timer: this.makeRwExpiryTimer(lockUuid, readTtl(body), 'read'),
+        });
+
+        return this.respondJson(res, 200, {
+            acquired: true,
+            key,
+            mode: 'read',
+            lockUuid,
+            fencingToken: reply.fencingToken,
+            readersCount: this.broker.locks.get(key)?.readers || 0,
+            lockRequestCount: reply.lockRequestCount,
+        });
+    }
+
+    private async handleRwReadUnlock(body: any, res: http.ServerResponse): Promise<void> {
+        const routineId = 'ddl-routine-http-handleRwReadUnlock-xP4';
+        routineEnter(routineId, "LMXHttpServer.handleRwReadUnlock");
+        const key = typeof body.key === 'string' ? body.key : null;
+        const lockUuid = typeof body.lockUuid === 'string' ? body.lockUuid : null;
+        if (!key) {
+            return this.respondJson(res, 400, {error: '`key` is required and must be a string.'});
+        }
+        if (!lockUuid) {
+            return this.respondJson(res, 400, {error: '`lockUuid` is required.'});
+        }
+        const hold = this.rwReadHolds.get(lockUuid);
+        if (hold && hold.key !== key) {
+            return this.respondJson(res, 400, {
+                released: false,
+                key,
+                mode: 'read',
+                lockUuid,
+                error: `lockUuid belongs to key "${hold.key}", not "${key}".`,
+            });
+        }
+        const released = await this.releaseRwReadHold(lockUuid);
+        if (!released) {
+            return this.respondJson(res, 404, {
+                released: false,
+                key,
+                mode: 'read',
+                lockUuid,
+                error: `Unknown read lockUuid="${lockUuid}" (already released or never granted).`,
+            });
+        }
+        return this.respondJson(res, 200, {
+            released: true,
+            key,
+            mode: 'read',
+            lockUuid,
+            readersCount: this.broker.locks.get(key)?.readers || 0,
+        });
+    }
+
+    private async handleRwWriteLock(body: any, res: http.ServerResponse): Promise<void> {
+        const routineId = 'ddl-routine-http-handleRwWriteLock-Zp3';
+        routineEnter(routineId, "LMXHttpServer.handleRwWriteLock");
+        const key = typeof body.key === 'string' ? body.key : null;
+        if (!key) {
+            return this.respondJson(res, 400, {error: '`key` is required and must be a string.'});
+        }
+
+        const reply = await this.bridge!.lock({
+            key,
+            ttl: readTtl(body),
+            max: 1,
+            maxWrite: 1,
+            wait: false,
+            rwStatus: RWStatus.BeginWrite,
+        });
+
+        if (reply.acquired === false && typeof reply.error === 'string') {
+            return this.respondJson(res, 400, {acquired: false, key, mode: 'write', error: reply.error});
+        }
+        if (reply.acquired !== true) {
+            return this.respondJson(res, 409, {
+                acquired: false,
+                key,
+                mode: 'write',
+                lockRequestCount: reply.lockRequestCount,
+            });
+        }
+
+        try {
+            await this.bridge!.registerWriteFlagAndReadersCheck(key);
+        } catch (err) {
+            await this.bridge!.unlock({key, lockUuid: reply._bridgeRequestUuid}).catch(() => {});
+            return this.respondJson(res, 500, {
+                acquired: false,
+                key,
+                mode: 'write',
+                error: String((err as Error)?.message || err),
+            });
+        }
+
+        const lockUuid = reply._bridgeRequestUuid;
+        this.rwWriteHolds.set(lockUuid, {
+            key,
+            lockUuid,
+            timer: this.makeRwExpiryTimer(lockUuid, readTtl(body), 'write'),
+        });
+
+        return this.respondJson(res, 200, {
+            acquired: true,
+            key,
+            mode: 'write',
+            lockUuid,
+            fencingToken: reply.fencingToken,
+            lockRequestCount: reply.lockRequestCount,
+        });
+    }
+
+    private async handleRwWriteUnlock(body: any, res: http.ServerResponse): Promise<void> {
+        const routineId = 'ddl-routine-http-handleRwWriteUnlock-Mm8';
+        routineEnter(routineId, "LMXHttpServer.handleRwWriteUnlock");
+        const key = typeof body.key === 'string' ? body.key : null;
+        const lockUuid = typeof body.lockUuid === 'string' ? body.lockUuid : null;
+        if (!key) {
+            return this.respondJson(res, 400, {error: '`key` is required and must be a string.'});
+        }
+        if (!lockUuid) {
+            return this.respondJson(res, 400, {error: '`lockUuid` is required.'});
+        }
+        const hold = this.rwWriteHolds.get(lockUuid);
+        if (hold && hold.key !== key) {
+            return this.respondJson(res, 400, {
+                released: false,
+                key,
+                mode: 'write',
+                lockUuid,
+                error: `lockUuid belongs to key "${hold.key}", not "${key}".`,
+            });
+        }
+        const released = await this.releaseRwWriteHold(lockUuid);
+        if (!released) {
+            return this.respondJson(res, 404, {
+                released: false,
+                key,
+                mode: 'write',
+                lockUuid,
+                error: `Unknown write lockUuid="${lockUuid}" (already released or never granted).`,
+            });
+        }
+        return this.respondJson(res, 200, {released: true, key, mode: 'write', lockUuid});
     }
 
     private async handleUnlock(body: any, res: http.ServerResponse): Promise<void> {
@@ -451,8 +731,8 @@ export class LMXHttpServer {
         if (!keys || keys.length === 0) {
             return this.respondJson(res, 400, {error: '`keys` must be a non-empty array of strings.'});
         }
-        const ttl = Number.isInteger(body.ttl) ? body.ttl : null;
-        const reply = await this.bridge!.acquireMany(keys, ttl);
+        const ttl = readTtl(body);
+        const reply = await this.bridge!.acquireMany(keys, ttl, {wait: false});
         const status = reply.acquired ? 200 : 409;
         return this.respondJson(res, status, {
             acquired: !!reply.acquired,
@@ -478,6 +758,66 @@ export class LMXHttpServer {
             keys: reply.keys,
             error: reply.error,
         });
+    }
+
+    private makeRwExpiryTimer(lockUuid: string, ttl: number | null, mode: 'read' | 'write'): NodeJS.Timeout | undefined {
+        const routineId = 'ddl-routine-http-makeRwExpiryTimer-cN5';
+        routineEnter(routineId, "LMXHttpServer.makeRwExpiryTimer");
+        if (!Number.isInteger(ttl) || ttl < 1) return undefined;
+        const timer = setTimeout(() => {
+            const release = mode === 'read'
+                ? this.releaseRwReadHold(lockUuid)
+                : this.releaseRwWriteHold(lockUuid);
+            release.catch(err => {
+                this.broker.emitter.emit('warning',
+                    `LMX HTTP RW ${mode} expiry cleanup failed for ${lockUuid}: ${String(err && err.message || err)}`);
+            });
+        }, ttl + 25);
+        if (typeof timer.unref === 'function') timer.unref();
+        return timer;
+    }
+
+    private async releaseRwReadHold(lockUuid: string): Promise<boolean> {
+        const routineId = 'ddl-routine-http-releaseRwReadHold-Yp7';
+        routineEnter(routineId, "LMXHttpServer.releaseRwReadHold");
+        const hold = this.rwReadHolds.get(lockUuid);
+        if (!hold) return false;
+        this.rwReadHolds.delete(lockUuid);
+        if (hold.timer) clearTimeout(hold.timer);
+        try {
+            await this.bridge!.decrementReaders(hold.key);
+        } finally {
+            await this.bridge!.unlock({key: hold.key, lockUuid: hold.lockUuid}).catch(() => {});
+        }
+        return true;
+    }
+
+    private async releaseRwWriteHold(lockUuid: string): Promise<boolean> {
+        const routineId = 'ddl-routine-http-releaseRwWriteHold-Mf6';
+        routineEnter(routineId, "LMXHttpServer.releaseRwWriteHold");
+        const hold = this.rwWriteHolds.get(lockUuid);
+        if (!hold) return false;
+        this.rwWriteHolds.delete(lockUuid);
+        if (hold.timer) clearTimeout(hold.timer);
+        try {
+            await this.bridge!.unlock({key: hold.key, lockUuid: hold.lockUuid});
+        } finally {
+            await this.bridge!.setWriteFlagFalseAndBroadcast(hold.key).catch(() => {});
+        }
+        return true;
+    }
+
+    private async releaseAllRwHolds(): Promise<void> {
+        const routineId = 'ddl-routine-http-releaseAllRwHolds-Fx2';
+        routineEnter(routineId, "LMXHttpServer.releaseAllRwHolds");
+        const readIds = Array.from(this.rwReadHolds.keys());
+        const writeIds = Array.from(this.rwWriteHolds.keys());
+        for (const id of readIds) {
+            await this.releaseRwReadHold(id).catch(() => {});
+        }
+        for (const id of writeIds) {
+            await this.releaseRwWriteHold(id).catch(() => {});
+        }
     }
 
     private async readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<any> {
@@ -724,6 +1064,28 @@ function esc(s: any): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function readTtl(body: any): number | null {
+    const ttl = body && Number.isInteger(body.ttl) ? body.ttl : undefined;
+    const ttlMs = body && Number.isInteger(body.ttlMs) ? body.ttlMs : undefined;
+    return ttl !== undefined ? ttl : (ttlMs !== undefined ? ttlMs : null);
+}
+
+function readPositiveIntegerAlias(body: any, fields: string[]): {value?: number, error?: string} {
+    let seen: {field: string, value: number} | null = null;
+    for (const field of fields) {
+        if (!body || body[field] === undefined || body[field] === null) continue;
+        const value = body[field];
+        if (!Number.isInteger(value) || value < 1) {
+            return {error: `\`${field}\` must be a positive integer when provided.`};
+        }
+        if (seen && seen.value !== value) {
+            return {error: `Capacity aliases disagree: \`${seen.field}\`=${seen.value}, \`${field}\`=${value}.`};
+        }
+        seen = {field, value};
+    }
+    return seen ? {value: seen.value} : {};
 }
 
 /// Coerce JSON booleans + form-urlencoded string booleans (`"true"`,

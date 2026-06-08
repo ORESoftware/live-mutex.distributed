@@ -268,8 +268,10 @@ Cluster-internal callers reach the broker at:
 - `http://live-mutex.default.svc.cluster.local:6971/v1/*` for
   serverless-style callers (Lambda, Workers) that can't hold a
   long-lived TCP connection. The HTTP API surface includes
-  `/v1/lock`, `/v1/unlock`, `/v1/acquire-many`, `/v1/release-many`,
-  and the auto-refresh status page on `/`.
+  `/v1/lock`, `/v1/unlock`, `/v1/semaphore/acquire`,
+  `/v1/semaphore/release`, `/v1/rw/read-lock`, `/v1/rw/read-unlock`,
+  `/v1/rw/write-lock`, `/v1/rw/write-unlock`, `/v1/acquire-many`,
+  `/v1/release-many`, and the auto-refresh status page on `/`.
 
 ## Authentication
 
@@ -445,6 +447,24 @@ LOCK_UUID=$(curl -s http://127.0.0.1:16971/v1/lock \
 curl -s http://127.0.0.1:16971/v1/unlock \
   -H 'content-type: application/json' \
   -d "{\"key\":\"smoke\",\"lockUuid\":\"$LOCK_UUID\"}"
+
+# Semaphore slot with cap=3
+LOCK_UUID=$(curl -s http://127.0.0.1:16971/v1/semaphore/acquire \
+  -H 'content-type: application/json' \
+  -d '{"key":"smoke-semaphore","cap":3,"ttlMs":2000}' | jq -r .lockUuid)
+
+curl -s http://127.0.0.1:16971/v1/semaphore/release \
+  -H 'content-type: application/json' \
+  -d "{\"key\":\"smoke-semaphore\",\"lockUuid\":\"$LOCK_UUID\"}"
+
+# RW read/write locks
+READ_UUID=$(curl -s http://127.0.0.1:16971/v1/rw/read-lock \
+  -H 'content-type: application/json' \
+  -d '{"key":"smoke-rw","maxRead":3,"ttlMs":2000}' | jq -r .lockUuid)
+
+curl -s http://127.0.0.1:16971/v1/rw/read-unlock \
+  -H 'content-type: application/json' \
+  -d "{\"key\":\"smoke-rw\",\"lockUuid\":\"$READ_UUID\"}"
 
 # Acquire + release a multi-key lock (atomic):
 LOCK_UUID=$(curl -s http://127.0.0.1:16971/v1/acquire-many \

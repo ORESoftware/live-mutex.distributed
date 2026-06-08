@@ -165,6 +165,44 @@ async function main() {
     if (bad.status !== 400) fail(`max=0 over HTTP+bridge should be 400, got ${bad.status}`);
     ok('max=0 rejected via the bridge with HTTP 400');
 
+    const sem1 = await httpJson(httpPort, 'POST', '/v1/semaphore/acquire', {key: 'http-sem', cap: 2, ttl: 5_000});
+    const sem2 = await httpJson(httpPort, 'POST', '/v1/semaphore/acquire', {key: 'http-sem', cap: 2, ttl: 5_000});
+    const sem3 = await httpJson(httpPort, 'POST', '/v1/semaphore/acquire', {key: 'http-sem', cap: 2, ttl: 5_000});
+    if (sem1.status !== 200 || sem2.status !== 200 || sem1.body.acquired !== true || sem2.body.acquired !== true) {
+        fail(`HTTP semaphore first two grants failed: ${JSON.stringify({sem1, sem2})}`);
+    }
+    if (sem3.status !== 409 || sem3.body.acquired !== false) {
+        fail(`HTTP semaphore cap should reject third holder with 409: ${JSON.stringify(sem3)}`);
+    }
+    await httpJson(httpPort, 'POST', '/v1/semaphore/release', {key: 'http-sem', lockUuid: sem1.body.lockUuid});
+    await httpJson(httpPort, 'POST', '/v1/semaphore/release', {key: 'http-sem', lockUuid: sem2.body.lockUuid});
+    ok('POST /v1/semaphore/acquire enforces cap=2 over HTTP');
+
+    const rd1 = await httpJson(httpPort, 'POST', '/v1/rw/read-lock', {key: 'http-rw', maxRead: 2, ttl: 5_000});
+    const rd2 = await httpJson(httpPort, 'POST', '/v1/rw/read-lock', {key: 'http-rw', maxRead: 2, ttl: 5_000});
+    const wrBlocked = await httpJson(httpPort, 'POST', '/v1/rw/write-lock', {key: 'http-rw', ttl: 5_000});
+    if (rd1.status !== 200 || rd2.status !== 200 || rd1.body.mode !== 'read' || rd2.body.mode !== 'read') {
+        fail(`HTTP RW read grants failed: ${JSON.stringify({rd1, rd2})}`);
+    }
+    if (wrBlocked.status !== 409 || wrBlocked.body.acquired !== false) {
+        fail(`HTTP RW write should be blocked by active readers: ${JSON.stringify(wrBlocked)}`);
+    }
+    await httpJson(httpPort, 'POST', '/v1/rw/read-unlock', {key: 'http-rw', lockUuid: rd1.body.lockUuid});
+    await httpJson(httpPort, 'POST', '/v1/rw/read-unlock', {key: 'http-rw', lockUuid: rd2.body.lockUuid});
+    const wr = await httpJson(httpPort, 'POST', '/v1/rw/write-lock', {key: 'http-rw', ttl: 5_000});
+    if (wr.status !== 200 || wr.body.mode !== 'write') {
+        fail(`HTTP RW write did not grant after readers released: ${JSON.stringify(wr)}`);
+    }
+    const rdBlocked = await httpJson(httpPort, 'POST', '/v1/rw/read-lock', {key: 'http-rw', maxRead: 2, ttl: 5_000});
+    if (rdBlocked.status !== 409 || rdBlocked.body.acquired !== false) {
+        fail(`HTTP RW read should be blocked by active writer: ${JSON.stringify(rdBlocked)}`);
+    }
+    const wrReleased = await httpJson(httpPort, 'POST', '/v1/rw/write-unlock', {key: 'http-rw', lockUuid: wr.body.lockUuid});
+    if (wrReleased.status !== 200 || wrReleased.body.released !== true) {
+        fail(`HTTP RW write release failed: ${JSON.stringify(wrReleased)}`);
+    }
+    ok('POST /v1/rw/* enforces read/write exclusion over HTTP');
+
     // ===========================================================
     // [5] bridge.shutdown() releases held holds (TCP-disconnect parity).
     // ===========================================================

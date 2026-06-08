@@ -1,8 +1,10 @@
 # live-mutex wire protocol (Broker1)
 
-This document specifies the JSON-over-TCP protocol spoken by the
-fencing-token-aware `Broker1` (`src/broker-1.ts`). It is the contract the
-cross-runtime clients under `clients/` implement.
+This document specifies the public client protocols spoken by the
+fencing-token-aware `Broker1` (`src/broker-1.ts`): newline-delimited
+JSON over TCP/UDS, and the optional JSON HTTP API. These are the stable
+contracts that any runtime can use to request locks from a live-mutex
+broker or cluster gateway.
 
 > **Note on broker variants.** The repo ships two broker classes. The legacy
 > `Broker` (`src/broker.ts`) does **not** emit fencing tokens or support
@@ -11,7 +13,7 @@ cross-runtime clients under `clients/` implement.
 > `Broker1`. When a client talks to the legacy broker, `fencingToken` is
 > simply absent and clients should treat it as `0`/unknown.
 
-## Transport
+## TCP / UDS Transport
 
 - TCP, `TCP_NODELAY` on.
 - **Framing:** newline-delimited JSON (NDJSON). Exactly one JSON object per
@@ -23,6 +25,33 @@ cross-runtime clients under `clients/` implement.
   2^53 is not expected (they are `Date.now()`-seeded counters), but clients
   should still parse them without lossy `double` round-tripping where the
   language makes that easy.
+
+## HTTP Transport
+
+When the broker is started with the HTTP front-end enabled, any language with
+an HTTP client can use the same lock service without implementing the TCP
+framing layer.
+
+```
+POST /v1/lock                 {key, ttl?, ttlMs?, max?, cap?, semaphore?}
+POST /v1/unlock               {key, lockUuid, force?}
+POST /v1/semaphore/acquire    {key, max|cap|semaphore, ttl?, ttlMs?}
+POST /v1/semaphore/release    {key, lockUuid}
+POST /v1/rw/read-lock         {key, maxRead?, max?, cap?, ttl?, ttlMs?}
+POST /v1/rw/read-unlock       {key, lockUuid}
+POST /v1/rw/write-lock        {key, ttl?, ttlMs?}
+POST /v1/rw/write-unlock      {key, lockUuid}
+POST /v1/acquire-many         {keys, ttl?, ttlMs?}
+POST /v1/release-many         {lockUuid}
+GET  /healthz
+GET  /metrics
+GET  /v1/stats
+```
+
+HTTP lock acquisition is intentionally try-acquire style: if the requested
+slot is not immediately available, the broker returns `409` with
+`{"acquired":false,...}` instead of queueing a future grant after the HTTP
+response is gone. TCP clients keep the queued/waiting behavior described below.
 
 ## Handshake
 
@@ -51,6 +80,7 @@ broker → {type:"lock", uuid, key, acquired:true,  fencingToken, lockRequestCou
 - `ttl`: lock lease in ms. `null` → broker default (`lockExpiresAfter`, ~5s).
 - `max`: per-key concurrency. Omitted → mutex (`max = 1`). `max >= 2` makes the
   key a semaphore. `max < 1` is rejected.
+- HTTP also accepts `cap` and `semaphore` as aliases for `max`.
 - **Contention:** if the key is held, the broker does **not** reply
   immediately. It enqueues the waiter and sends `acquired:true` only when the
   waiter is promoted to holder. Clients block until they see `acquired:true`
@@ -74,6 +104,26 @@ broker → {type:"unlock", uuid, key, unlocked:true,  lockRequestCount}
   rather than silently wiping peers.
 - Unlocks are idempotent against TTL eviction: a late unlock for a holder the
   sweeper already evicted returns `unlocked:true`.
+
+### Read/write locks
+
+RW locks are supported in two forms:
+
+- TCP clients can use the canonical Node RW clients
+  (`RWLockWritePrefClient` / `RWLockReadPrefClient`) or implement the raw
+  broker frames listed in `LMXRequestType`: `increment-readers`,
+  `decrement-readers`, `register-write-flag-check`,
+  `register-write-flag-and-readers-check`, and
+  `set-write-flag-false-and-broadcast`.
+- HTTP clients can use the language-neutral endpoints:
+  `/v1/rw/read-lock`, `/v1/rw/read-unlock`, `/v1/rw/write-lock`, and
+  `/v1/rw/write-unlock`.
+
+HTTP read locks allow multiple concurrent readers up to `maxRead` (default
+`10`). HTTP write locks are exclusive and return `409` while readers or another
+writer hold the key. Successful HTTP RW responses include `mode`, `key`,
+`lockUuid`, and `fencingToken` on acquire; release requires the same `key` and
+returned `lockUuid`.
 
 ### acquire-many (atomic multi-key)
 
@@ -114,14 +164,13 @@ broker → {type:"release-many", uuid, lockUuid, keys, released:true}
 5. **Deadlock-free multi-key:** concurrent `acquire-many` calls with
    overlapping key sets cannot deadlock (sorted acquisition order).
 
-## Features intentionally omitted by the reference clients
+## Notes for minimal reference clients
 
-- RW locks (`registerRead`/`registerWrite`/`endRead`/`endWrite`).
-- The legacy `lock-received` ack. The broker's centralised TTL sweeper
+- The small cross-runtime reference clients focus on TCP acquire/release,
+  fencing tokens, semaphores, and acquire-many. Runtimes that do not ship a
+  first-party RW helper can still use RW locks through the HTTP endpoints or by
+  issuing the raw TCP frames above.
+- The legacy `lock-received` ack is optional. The broker's centralised TTL sweeper
   reclaims holders that disconnect or never ack, so stateless callers may
   skip it.
 - `ls` / `lockInfo` inspection RPCs.
-
-These are supported by the canonical Node client (`src/client.ts`); the
-minimal cross-runtime clients focus on the core lock lifecycle and the
-fencing-token / acquire-many features.

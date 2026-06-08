@@ -46,6 +46,7 @@ import {EventEmitter} from 'events';
 import * as UUID from 'uuid';
 import {Broker1, LMXSocket} from './broker-1';
 import {LMXRequestType} from './protocol';
+import {RWStatus} from './shared-internal';
 
 /**
  * Awaiter handle for a single in-flight in-process request. The
@@ -442,21 +443,35 @@ export class InProcessBridge {
     /// verbatim — the caller decides whether `acquired:false` is a
     /// validation error (HTTP 400) or a queued-grant (HTTP 200 with
     /// `acquired:false`).
-    async lock(data: {key: string, ttl?: number | null, max?: number, force?: boolean, keepLocksAfterDeath?: boolean}): Promise<any> {
+    async lock(data: {
+        key: string,
+        ttl?: number | null,
+        max?: number,
+        maxRead?: number,
+        maxWrite?: number,
+        force?: boolean,
+        wait?: boolean,
+        keepLocksAfterDeath?: boolean,
+        rwStatus?: RWStatus | string | null,
+    }): Promise<any> {
         const routineId = 'ddl-routine-tFdYCFhXStELjYbXy6';
         routineEnter(routineId, "InProcessBridge.lock");
         const uuid = UUID.v4();
-        const payload = {
+        const payload: any = {
             type: LMXRequestType.Lock,
             uuid,
             key: data.key,
             ttl: data.ttl ?? null,
             max: data.max,
+            maxRead: data.maxRead,
+            maxWrite: data.maxWrite,
             force: data.force ?? false,
+            wait: data.wait,
             pid: process.pid,
             keepLocksAfterDeath: data.keepLocksAfterDeath ?? false,
             retryCount: 0,
         };
+        if (data.rwStatus) payload.rwStatus = data.rwStatus;
         const reply = await this.dispatch(uuid, () => this.broker.lock(payload, this.socket as unknown as LMXSocket));
         return {...reply, _bridgeRequestUuid: uuid};
     }
@@ -475,7 +490,7 @@ export class InProcessBridge {
         return this.dispatch(uuid, () => this.broker.unlock(payload, this.socket as unknown as LMXSocket));
     }
 
-    async acquireMany(keys: string[], ttlMs?: number | null): Promise<any> {
+    async acquireMany(keys: string[], ttlMs?: number | null, opts?: {wait?: boolean}): Promise<any> {
         const routineId = 'ddl-routine-8d_2J7w0WRPljKdeWG';
         routineEnter(routineId, "InProcessBridge.acquireMany");
         const uuid = UUID.v4();
@@ -484,6 +499,7 @@ export class InProcessBridge {
             uuid,
             keys,
             ttl: ttlMs ?? null,
+            wait: opts?.wait,
             pid: process.pid,
             keepLocksAfterDeath: false,
         };
@@ -496,6 +512,38 @@ export class InProcessBridge {
         const uuid = UUID.v4();
         const payload = {type: LMXRequestType.ReleaseMany, uuid, lockUuid};
         return this.dispatch(uuid, () => this.broker.releaseMany(payload, this.socket as unknown as LMXSocket));
+    }
+
+    async incrementReaders(key: string): Promise<any> {
+        const routineId = 'ddl-routine-bridge-incrementReaders-1sK';
+        routineEnter(routineId, "InProcessBridge.incrementReaders");
+        const uuid = UUID.v4();
+        const payload = {type: LMXRequestType.IncrementReaders, uuid, key};
+        return this.dispatch(uuid, () => this.broker.incrementReaders(payload, this.socket as unknown as LMXSocket));
+    }
+
+    async decrementReaders(key: string): Promise<any> {
+        const routineId = 'ddl-routine-bridge-decrementReaders-aW4';
+        routineEnter(routineId, "InProcessBridge.decrementReaders");
+        const uuid = UUID.v4();
+        const payload = {type: LMXRequestType.DecrementReaders, uuid, key};
+        return this.dispatch(uuid, () => this.broker.decrementReaders(payload, this.socket as unknown as LMXSocket));
+    }
+
+    async registerWriteFlagAndReadersCheck(key: string): Promise<any> {
+        const routineId = 'ddl-routine-bridge-registerWriteFlagAndReadersCheck-Bq9';
+        routineEnter(routineId, "InProcessBridge.registerWriteFlagAndReadersCheck");
+        const uuid = UUID.v4();
+        const payload = {type: LMXRequestType.RegisterWriteFlagAndReadersCheck, uuid, key};
+        return this.dispatch(uuid, () => this.broker.registerWriteFlagAndReadersCheck(payload, this.socket as unknown as LMXSocket));
+    }
+
+    async setWriteFlagFalseAndBroadcast(key: string): Promise<any> {
+        const routineId = 'ddl-routine-bridge-setWriteFlagFalseAndBroadcast-Hm2';
+        routineEnter(routineId, "InProcessBridge.setWriteFlagFalseAndBroadcast");
+        const uuid = UUID.v4();
+        const payload = {type: LMXRequestType.SetWriteFlagFalseAndBroadcast, uuid, key};
+        return this.dispatch(uuid, () => this.broker.setWriteFlagToFalseAndBroadcast(payload, this.socket as unknown as LMXSocket));
     }
 
     /// Tear down the bridge. Releases every hold owned by the virtual

@@ -57,7 +57,7 @@ export class Composite {
   /** Build from an arbitrary key list (canonicalized); throws if invalid. */
   static create(keys: LockId[]): Composite {
     const r = canonicalKeys(keys);
-    if (!r.ok) {
+    if (r.ok === false) {
       throw new Error(`invalid composite key set: ${JSON.stringify(r.error)}`);
     }
     return new Composite(r.keys);

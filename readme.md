@@ -132,7 +132,7 @@ await client.release(key, {id});
 * Live-Mutex is a *non-distributed* networked mutex/semaphore for synchronization across multiple processes/threads.
 * Non-distributed means no failover if the broker goes down, but the upside is higher-performance.
 * By default, a binary semaphore, but can be used to create a non-binary semaphore, where multiple lockholders can hold a lock, for example, to do some form of rate limiting.
-* Live-Mutex can use either TCP or Unix Domain Sockets (UDS) to create an evented (non-polling) networked mutex API.
+* Live-Mutex can use TCP, Unix Domain Sockets (UDS), or the optional HTTP JSON API to create an evented (non-polling) networked mutex API.
 * Live-Mutex is significantly (orders of magnitude) more performant than Lockfile and Warlock for high-concurrency locking requests.
 * When Warlock and Lockfile are not finely/expertly tuned, 5x more performant becomes more like 30x or 40x.
 * Live-Mutex should also be much less memory and CPU intensive than Lockfile and Warlock, because Live-Mutex is
@@ -145,7 +145,7 @@ You can easily Dockerize the Live-Mutex broker using: https://github.com/ORESoft
 
 <br>
 
-On a single machine, use Unix Domain Sockets for max performance. On a network, use TCP.
+On a single machine, use Unix Domain Sockets for max performance. On a network, use TCP for long-lived clients, or the HTTP API for runtimes that should not hold a custom socket client.
 To use UDS, pass in "udsPath" to the client and broker constructors. Otherwise for TCP, pass a host/port combo to both.
 
 <br>
@@ -599,6 +599,47 @@ c.lock('<key>', {max:12}, (err,val) => {
 
 Non-binary semaphores are well-supported by live-mutex and are a primary feature.
 
+The HTTP API uses the same capacity field and also accepts `cap` or
+`semaphore` as aliases:
+
+```bash
+curl -s http://127.0.0.1:6971/v1/semaphore/acquire \
+  -H 'content-type: application/json' \
+  -d '{"key":"rate-limit:send-email","cap":12,"ttlMs":5000}'
+```
+
+<br>
+
+## Client transports and RW locks
+
+Clients can request locks through either public client transport:
+
+- TCP/UDS: newline-delimited JSON frames (`type:"lock"`, `type:"unlock"`,
+  `type:"acquire-many"`, etc.). This is what the native clients under
+  `clients/` speak.
+- HTTP: JSON routes such as `/v1/lock`, `/v1/unlock`,
+  `/v1/semaphore/acquire`, `/v1/rw/read-lock`, `/v1/rw/write-lock`,
+  `/v1/acquire-many`, and matching release routes. This is the easiest path
+  for any language/runtime that already has an HTTP client.
+
+Read/write locks are supported, not just exclusive locks. The TypeScript API
+exports `RWLockWritePrefClient` and `RWLockReadPrefClient`; HTTP callers can
+use:
+
+```bash
+curl -s http://127.0.0.1:6971/v1/rw/read-lock \
+  -H 'content-type: application/json' \
+  -d '{"key":"customer:42","maxRead":10,"ttlMs":5000}'
+
+curl -s http://127.0.0.1:6971/v1/rw/write-lock \
+  -H 'content-type: application/json' \
+  -d '{"key":"customer:42","ttlMs":5000}'
+```
+
+HTTP acquisition is try-acquire style: if the key is already at capacity, the
+server returns `409` with `acquired:false` instead of queueing a grant after the
+HTTP response has returned. TCP clients keep the normal queued waiting behavior.
+
 <br>
 
 ## Fencing tokens
@@ -966,5 +1007,4 @@ it will likely not be possible, but that's ok, since you can just use TCP/ports.
  ```
 
 </details>
-
 

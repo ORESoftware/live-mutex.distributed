@@ -1,0 +1,144 @@
+[help]
+url = "https://github.com/ORESoftware/live-mutex#readme"
+columns = ["options", "env", "type", "default", "description"]
+
+[parse]
+allow_unknown = false
+errors_env = "LMX_CLI_PARSE_ERRORS"
+unknown_options_env = "LMX_CLI_UNKNOWN_OPTIONS"
+
+[flags.host]
+env = "live_mutex_host"
+aliases = ["host", "broker-host", "live-mutex-host"]
+type = "string"
+help = "TCP host interface for the broker listener."
+
+[flags.port]
+env = "live_mutex_port"
+aliases = ["port", "broker-port", "live-mutex-port"]
+short = "p"
+type = "integer"
+help = "TCP port for the broker listener."
+
+[flags.use-uds]
+env = "use_uds"
+aliases = ["uds"]
+type = "bool"
+true_aliases = ["t", "1", "yes"]
+false_aliases = ["f", "0", "no"]
+help = "Listen on a Unix domain socket instead of TCP."
+
+[flags.uds-path]
+env = "live_mutex_uds_path"
+aliases = ["socket", "socket-path"]
+type = "string"
+help = "Unix domain socket path for the broker listener."
+
+[flags.lock-expires-after]
+env = "live_mutex_lock_expires_after"
+aliases = ["lock-ttl-ms"]
+type = "integer"
+help = "Default lock holder TTL in milliseconds."
+
+[flags.timeout-to-find-new-lockholder]
+env = "live_mutex_timeout_to_find_new_lockholder"
+aliases = ["handoff-timeout-ms"]
+type = "integer"
+help = "Timeout in milliseconds for finding a replacement lock holder."
+
+[flags.nodelay]
+env = "live_mutex_no_delay"
+aliases = ["no-delay"]
+type = "bool"
+true_aliases = ["t", "1", "yes"]
+false_aliases = ["f", "0", "no"]
+help = "Enable TCP_NODELAY on accepted broker sockets."
+
+[flags.http-port]
+env = "LMX_HTTP_PORT"
+aliases = ["status-port"]
+type = "integer"
+help = "Optional HTTP status/API listener port."
+
+[flags.http-host]
+env = "LMX_HTTP_HOST"
+aliases = ["status-host"]
+type = "string"
+help = "Host interface for the optional HTTP status/API listener."
+
+[flags.http-max-body-bytes]
+env = "LMX_HTTP_MAX_BODY_BYTES"
+aliases = ["http-body-limit", "status-max-body-bytes"]
+type = "integer"
+help = "Maximum HTTP request body size in bytes."
+
+[flags.http-request-timeout-ms]
+env = "LMX_HTTP_REQUEST_TIMEOUT_MS"
+aliases = ["http-timeout-ms", "status-timeout-ms"]
+type = "integer"
+help = "HTTP request timeout in milliseconds."
+
+[flags.http-html-status]
+env = "LMX_HTTP_HTML_STATUS"
+aliases = ["status-html"]
+type = "bool"
+true_aliases = ["t", "1", "yes"]
+false_aliases = ["f", "0", "no"]
+help = "Enable the human-friendly HTTP status page."
+
+[flags.admin-token]
+env = "LMX_ADMIN_TOKEN"
+aliases = ["http-admin-token", "status-admin-token"]
+type = "string"
+help = "Admin token required for HTTP /admin endpoints."
+
+[flags.log-level]
+env = "LMX_LOG_LEVEL"
+aliases = ["broker-log-level"]
+type = "string"
+help = "Broker log level: silent, error, warn, info, debug, or trace."
+
+[flags.log-errors]
+env = "lmx_log_errors"
+aliases = ["broker-log-errors"]
+type = "bool"
+true_aliases = ["t", "1", "yes"]
+false_aliases = ["f", "0", "no"]
+help = "Log process warnings and uncaught broker errors."
+
+[flags.json]
+env = "LMX_BROKER_CONFIG_JSON"
+aliases = ["json", "broker-config-json"]
+type = "json"
+help = "Legacy JSON broker config object."
+
+[flags.lmx-debug]
+env = "lmx_debug"
+type = "bool"
+true_aliases = ["t", "1", "yes"]
+false_aliases = ["f", "0", "no"]
+help = "Enable broker debug logging."
+
+[flags.otel-endpoint]
+env = "OTEL_EXPORTER_OTLP_ENDPOINT"
+aliases = ["otel-exporter-otlp-endpoint", "otlp-endpoint"]
+type = "string"
+help = "OTLP/gRPC endpoint for broker OpenTelemetry traces."
+
+[flags.otel-service-name]
+env = "OTEL_SERVICE_NAME"
+aliases = ["otel-service"]
+type = "string"
+help = "OpenTelemetry service.name for broker traces."
+
+[flags.otel-resource-attributes]
+env = "OTEL_RESOURCE_ATTRIBUTES"
+aliases = ["otel-attrs"]
+type = "string"
+help = "OpenTelemetry resource attributes."
+
+[flags.otel-log-level]
+env = "OTEL_LOG_LEVEL"
+aliases = ["otel-diagnostics"]
+type = "string"
+help = "OpenTelemetry SDK diagnostic log level."

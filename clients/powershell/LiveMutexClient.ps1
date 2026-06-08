@@ -9,7 +9,10 @@
 # Dot-source this file and use [LiveMutexClient]::Connect(host, port); see
 # smoke.ps1 for an end-to-end example.
 
-Set-StrictMode -Version Latest
+# StrictMode 1.0 still catches uninitialized variables but lets an absent JSON
+# field read back as $null (the legacy Broker omits fencingToken; a bare error
+# frame may omit `type`) instead of throwing.
+Set-StrictMode -Version 1.0
 
 # Wire `type` discriminators (mirror ../PROTOCOL.md) — named, not inlined.
 $script:LmxReq = @{

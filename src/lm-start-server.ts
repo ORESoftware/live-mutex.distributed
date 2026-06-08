@@ -1,71 +1,70 @@
 'use strict';
 
-import {Broker1, log} from "./broker-1";
-import {LMXHttpServer} from "./http-server";
-import {initOtel, routineEnter, shutdownOtel} from "./routine";
+import {loadBrokerRuntimeConfig, BrokerRuntimeConfigError} from "./broker-runtime-config";
 import * as fs from 'fs';
 import chalk from "chalk";
-import * as util from 'util';
 import * as path from "path";
-import {inspectError} from "./shared-internal";
-import * as cp from 'child_process';
 
-// Initialise OpenTelemetry as the very first thing the broker process
-// does, before any spans get created. Reads `OTEL_EXPORTER_OTLP_ENDPOINT`
-// from the environment; no-op when unset, so dev/test runs stay quiet.
+let runtimeConfig: ReturnType<typeof loadBrokerRuntimeConfig>;
+
+try {
+  runtimeConfig = loadBrokerRuntimeConfig();
+} catch (err) {
+  const prefix = chalk.red.bold('lmx broker error:');
+  if (err instanceof BrokerRuntimeConfigError) {
+    console.error(prefix, err.message);
+  } else {
+    const e = err as Error;
+    console.error(prefix, e && (e.stack || e.message) || String(err));
+  }
+  process.exit(1);
+}
+
+if (runtimeConfig.helpRequested) {
+  runtimeConfig.printHelp(process.stdout);
+  process.exit(0);
+}
+
+Object.assign(process.env, runtimeConfig.env);
+
+const {initOtel, routineEnter, shutdownOtel} = require('./routine') as typeof import('./routine');
+const {inspectError} = require('./shared-internal') as typeof import('./shared-internal');
+
+// Initialise OpenTelemetry before any broker spans get created. Reads
+// `OTEL_EXPORTER_OTLP_ENDPOINT` from the environment; no-op when unset,
+// so dev/test runs stay quiet.
 initOtel();
 {
   const routineId = 'ddl-routine-lm-start-server-Hp9zQ';
   routineEnter(routineId, 'lm-start-server-bootstrap');
 }
 
-let host = process.env.live_mutex_host || '0.0.0.0';
-let port = parseInt(process.env.live_mutex_port || '6970');
-const index = process.argv.indexOf('--json');
-const useUDS = process.env.use_uds === 'yes' || process.argv.indexOf('--use-uds') > 1;
+const {Broker1, log} = require('./broker-1') as typeof import('./broker-1');
+const {LMXHttpServer} = require('./http-server') as typeof import('./http-server');
 
+const v = {...runtimeConfig.broker} as any;
 
-// @ts-ignore
-let v = {port, host} as any;
-
-if (index > 1) {
-  try {
-    v = JSON.parse(process.argv[index + 1]);
-  }
-  catch (err) {
-    log.error(chalk.magenta(`Could not parse your --json argument, try --json '{"port":3091}'.`));
-    throw chalk.magentaBright(err.message);
-  }
-  
-  host = v.host = (v.host || host);
-  port = v.port = (v.port || port);
-}
-
-if (useUDS || v.udsPath) {
-  v.udsPath = path.resolve(process.env.HOME + '/.lmx/uds.sock');
+if (v.udsPath) {
+  v.udsPath = path.resolve(v.udsPath);
+  const udsDir = path.dirname(v.udsPath);
   
   try {
-    fs.mkdirSync(path.resolve(process.env.HOME + '/.lmx'), {recursive: true});
+    fs.mkdirSync(udsDir, {recursive: true});
   }
   catch (err) {
-    log.error('Could not create .lmx dir in user home.');
+    log.error(`Could not create UDS dir at '${udsDir}'.`);
     log.error(err);
     process.exit(1);
   }
   
-  try{
-    fs.unlinkSync(v.udsPath)
-  }
-  catch(err){
+  try {
+    fs.unlinkSync(v.udsPath);
+  } catch (err) {
      // ignore
   }
-  
 }
 
-
-
-
-if (!Number.isInteger(port)) {
+if (!Number.isInteger(v.port)) {
   log.error(chalk.magenta('Live-mutex: port could not be parsed to integer from command line input.'));
   log.error('Usage: lmx-start-server <key> <?port>');
   process.exit(1);
@@ -117,26 +116,25 @@ b.ensure().then(async b => {
    log.info(chalk.bold('LMX broker listening on:'), chalk.cyan.bold(String(b.getListeningInterface())));
 
    // Optional HTTP front-end. Off by default to avoid surprising
-   // existing deployments — opt in with `LMX_HTTP_PORT` (any positive
-   // integer). The HTTP server runs in this same process and talks to
-   // the broker over loopback; on UDS-only setups it dials the same
-   // socket file.
-   const httpPortRaw = process.env.LMX_HTTP_PORT;
-   if (httpPortRaw) {
-       const httpPort = Number.parseInt(httpPortRaw, 10);
-       if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
-           log.error(chalk.red(`Ignoring invalid LMX_HTTP_PORT='${httpPortRaw}' (expected 1..65535).`));
-       } else {
-           const httpHost = process.env.LMX_HTTP_HOST || '0.0.0.0';
-           const httpServer = new LMXHttpServer(b, {port: httpPort, host: httpHost});
-           try {
-               await httpServer.start();
-               log.info(chalk.bold('LMX HTTP status server listening on:'),
-                   chalk.cyan.bold(`http://${httpHost}:${httpPort}/`));
-               process.once('exit', () => { httpServer.stop().catch(() => {}); });
-           } catch (err) {
-               log.error('HTTP server failed to start:', inspectError(err as Error));
-           }
+   // existing deployments. The runtime config module reconciles
+   // `LMX_HTTP_*` env vars with `--http-*` CLI flags before we get here.
+   if (runtimeConfig.http.enabled) {
+       const httpPort = runtimeConfig.http.port as number;
+       const httpHost = runtimeConfig.http.host;
+       const httpServer = new LMXHttpServer(b, {
+           enableHtmlStatus: runtimeConfig.http.enableHtmlStatus,
+           host: httpHost,
+           maxBodyBytes: runtimeConfig.http.maxBodyBytes,
+           port: httpPort,
+           requestTimeoutMs: runtimeConfig.http.requestTimeoutMs,
+       });
+       try {
+           await httpServer.start();
+           log.info(chalk.bold('LMX HTTP status server listening on:'),
+               chalk.cyan.bold(`http://${httpHost}:${httpPort}/`));
+           process.once('exit', () => { httpServer.stop().catch(() => {}); });
+       } catch (err) {
+           log.error('HTTP server failed to start:', inspectError(err as Error));
        }
    }
 })
