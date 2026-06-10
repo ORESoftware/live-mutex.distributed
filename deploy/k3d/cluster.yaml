@@ -1,0 +1,19 @@
+# Declarative k3d cluster (real k8s via k3s-in-docker) for live-mutex.distributed.
+# 1 server + 2 agents so the three lmxd pods land on different nodes — same shape
+# we deploy to the EC2 kubeadm cluster later (#4).
+#
+#   k3d cluster create --config deploy/k3d/cluster.yaml
+#   k3d image import live-mutex-distributed:dev -c live-mutex-distributed
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: live-mutex-distributed
+servers: 1
+agents: 2
+options:
+  k3d:
+    wait: true
+    timeout: "120s"
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

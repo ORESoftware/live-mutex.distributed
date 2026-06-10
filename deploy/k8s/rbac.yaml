@@ -1,0 +1,28 @@
+# Minimal RBAC so the verify Job can read the lmxd pods' logs (the demo workload
+# prints ACQUIRED lines there) and wait on pod readiness. Scoped to this
+# namespace, read-only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lmx-verify
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lmx-verify-log-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lmx-verify-log-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lmx-verify-log-reader
+subjects:
+  - kind: ServiceAccount
+    name: lmx-verify

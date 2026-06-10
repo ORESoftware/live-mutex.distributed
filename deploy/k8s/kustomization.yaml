@@ -1,0 +1,14 @@
+# Declarative bring-up of the leaderless lmxd cluster (DEMO workload mode).
+#   kubectl apply -k deploy/k8s
+# The verify Job is applied separately once the StatefulSet is Ready.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: live-mutex-distributed
+resources:
+  - namespace.yaml
+  - service-peers.yaml
+  - statefulset.yaml
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: live-mutex-distributed

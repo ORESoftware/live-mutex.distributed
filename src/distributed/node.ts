@@ -100,10 +100,66 @@ interface GrantOut {
  * {@link drainOutbox} to collect what it wants to send. {@link takeAcquired}
  * reports locks just entered; {@link takeLost} reports locks lost to a lapse.
  */
+/**
+ * How a requester chooses which arbiters to collect votes from, and how many it
+ * needs. Safety in every policy rests on the same invariant: any two
+ * requesters' fully-granted vote sets must intersect, so a single arbiter would
+ * have to grant its one vote twice — impossible. Only the quorum *shape* differs.
+ * See `live-mutex-mills.rs/docs/sqrt-n-quorum-design.md`.
+ *
+ *  - `'majority'`: ask every member, acquire on `floor(n/2)+1`. O(n) messages.
+ *  - `'grid'`: √n Maekawa — pack members row-major into a ceil(√n)×ceil(√n)
+ *    grid; a node's quorum is its row ∪ column (≈ 2√n−1 nodes, all of which
+ *    must grant). Any two row∪column sets intersect. O(√n) messages.
+ */
+export type QuorumPolicy = 'majority' | 'grid';
+
+/**
+ * The √n grid quorum for `id`: every member sharing its row or its column when
+ * `members` are packed row-major into a ceil(√n)×ceil(√n) grid. Includes `id`.
+ * Deterministic from the ordered member list, so every node computes the
+ * identical grid with no coordination.
+ */
+export function gridQuorum(id: NodeId, members: ReadonlyArray<NodeId>): NodeId[] {
+  const n = members.length;
+  let side = 1;
+  while (side * side < n) {
+    side++;
+  }
+  const idx = members.indexOf(id);
+  if (idx < 0) {
+    throw new Error('gridQuorum: id must be a member');
+  }
+  const row = Math.floor(idx / side);
+  const col = idx % side;
+  const seen = new Set<NodeId>();
+  const q: NodeId[] = [];
+  for (let c = 0; c < side; c++) {
+    const i = row * side + c;
+    if (i < n && !seen.has(members[i])) {
+      seen.add(members[i]);
+      q.push(members[i]);
+    }
+  }
+  for (let r = 0; r < side; r++) {
+    const i = r * side + col;
+    if (i < n && !seen.has(members[i])) {
+      seen.add(members[i]);
+      q.push(members[i]);
+    }
+  }
+  return q;
+}
+
 export class LMXConsensusNode {
   readonly id: NodeId;
+  /** Full cluster membership (sender validation + grid construction). */
   private readonly members: ReadonlyArray<NodeId>;
-  private readonly quorum: number;
+  /** Arbiters this node (as requester) asks/renews/releases at. */
+  private readonly targets: ReadonlyArray<NodeId>;
+  /** Grants needed to hold a lock (majority count, or |row∪col| under grid). */
+  private readonly threshold: number;
+  private readonly policy: QuorumPolicy;
   private lamport: Lamport = 0;
   private readonly arbiter = new Map<LockId, ArbiterState>();
   private readonly requester = new Map<LockId, RequesterState>();
@@ -112,19 +168,41 @@ export class LMXConsensusNode {
   private lostLocks: LockId[] = [];
   private now: Instant = 0;
 
-  constructor(id: NodeId, members: ReadonlyArray<NodeId>) {
+  constructor(
+    id: NodeId,
+    members: ReadonlyArray<NodeId>,
+    policy: QuorumPolicy = 'majority',
+  ) {
     validateMembers(id, members);
     this.id = id;
     this.members = members.slice();
-    this.quorum = Math.floor(members.length / 2) + 1;
+    this.policy = policy;
+    if (policy === 'grid') {
+      this.targets = gridQuorum(id, this.members);
+      this.threshold = this.targets.length;
+    } else {
+      this.targets = this.members;
+      this.threshold = Math.floor(members.length / 2) + 1;
+    }
   }
 
-  /** The quorum size, `floor(n/2) + 1`. */
+  /** Grants needed to hold a lock: `floor(n/2)+1` (majority) or `|row∪col|` (grid). */
   quorumSize(): number {
-    return this.quorum;
+    return this.threshold;
   }
 
-  /** Begin acquiring `lock`; broadcasts a vote request to every member. */
+  /** The arbiters this node collects votes from (all members, or its row∪col). */
+  quorumMembers(): ReadonlyArray<NodeId> {
+    return this.targets;
+  }
+
+  /** This node's quorum policy. */
+  quorumPolicy(): QuorumPolicy {
+    return this.policy;
+  }
+
+  /** Begin acquiring `lock`; sends a vote request to this node's quorum
+   * (every member under majority; its row∪column under grid). */
   request(now: Instant, lock: LockId): void {
     this.now = now;
     if (this.requester.has(lock)) {
@@ -139,7 +217,7 @@ export class LMXConsensusNode {
       locked: false,
       nextRenew: now + RENEW_INTERVAL,
     });
-    for (const m of this.members) {
+    for (const m of this.targets) {
       this.send(m, {type: ConsensusMsgType.Request, lock, req});
     }
   }
@@ -153,7 +231,7 @@ export class LMXConsensusNode {
     }
     this.requester.delete(lock);
     const fence = state.bestFence;
-    for (const m of this.members) {
+    for (const m of this.targets) {
       this.send(m, {type: ConsensusMsgType.Release, lock, req: state.req, fence});
     }
   }
@@ -225,7 +303,7 @@ export class LMXConsensusNode {
         for (const v of r.votes) {
           renews.push({to: v, lock, req: r.req});
         }
-        if (!r.locked && r.votes.size < this.quorum) {
+        if (!r.locked && r.votes.size < this.threshold) {
           rebroadcasts.push({lock, req: r.req});
         }
       }
@@ -234,7 +312,7 @@ export class LMXConsensusNode {
       this.send(to, {type: ConsensusMsgType.Renew, lock, req});
     }
     for (const {lock, req} of rebroadcasts) {
-      for (const m of this.members) {
+      for (const m of this.targets) {
         this.send(m, {type: ConsensusMsgType.Request, lock, req});
       }
     }
@@ -407,7 +485,7 @@ export class LMXConsensusNode {
     if (fence > r.bestFence) {
       r.bestFence = fence;
     }
-    if (r.votes.size >= this.quorum) {
+    if (r.votes.size >= this.threshold) {
       // Quorum reached — enter the critical section.
       r.locked = true;
       const token = r.bestFence + 1;
@@ -452,10 +530,10 @@ export class LMXConsensusNode {
       return;
     }
     r.votes.delete(from);
-    if (r.locked && r.votes.size < this.quorum) {
+    if (r.locked && r.votes.size < this.threshold) {
       this.requester.delete(lock);
       const fence = r.bestFence;
-      for (const m of this.members) {
+      for (const m of this.targets) {
         this.send(m, {type: ConsensusMsgType.Release, lock, req: r.req, fence});
       }
       this.lostLocks.push(lock);

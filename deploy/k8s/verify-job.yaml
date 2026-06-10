@@ -1,0 +1,97 @@
+# One-shot correctness gate for the live distributed cluster. Apply AFTER the
+# StatefulSet is Ready (alongside rbac.yaml):
+#   kubectl -n live-mutex-distributed apply -f deploy/k8s/rbac.yaml -f deploy/k8s/verify-job.yaml
+#
+# The distributed engine has no external client API, so instead of driving it we
+# OBSERVE it: every node runs the LMX_DEMO workload (all contend on the same
+# composite lock). This Job scrapes every pod's logs and asserts:
+#   * Safety: no (key, fence) pair is logged by more than one acquisition across
+#     the whole cluster. Fences are per-lock strictly-increasing tokens, so a
+#     repeated (key, fence) means two nodes believed they held the same lock at
+#     the same token = a double-grant = mutual-exclusion violation.
+#   * Handoff: at least two distinct nodes acquired (the lock really moves across
+#     the cluster, it isn't monopolised by one node).
+#   * Liveness: a healthy number of acquisitions accumulated in the window.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmx-verify
+data:
+  verify.sh: |
+    #!/bin/sh
+    set -u
+    NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+    SEL="app=live-mutex-distributed"
+    WINDOW="${WINDOW:-35}"
+    MIN_ACQ="${MIN_ACQ:-15}"
+
+    echo "# ns=$NS — waiting for pods ready"
+    kubectl -n "$NS" wait --for=condition=ready pod -l "$SEL" --timeout=150s \
+      || { echo "FAIL: pods never ready"; exit 1; }
+
+    echo "# letting the demo run ${WINDOW}s to accumulate cross-node handoffs"
+    sleep "$WINDOW"
+
+    raw=/tmp/raw; : > "$raw"
+    for p in $(kubectl -n "$NS" get pods -l "$SEL" -o name); do
+      name=${p#pod/}
+      kubectl -n "$NS" logs "$p" --tail=-1 2>/dev/null | sed "s/^/$name /" >> "$raw"
+    done
+
+    acq=/tmp/acq
+    grep ' ACQUIRED ' "$raw" \
+      | sed -n 's/^\([^ ]*\) ACQUIRED \([A-Za-z0-9_-]*\) fence=\([0-9][0-9]*\).*/\2 \3 \1/p' > "$acq"
+
+    total=$(wc -l < "$acq" | tr -d ' ')
+    nodes=$(awk '{print $3}' "$acq" | sort -u | grep -c .)
+    keys=$(awk '{print $1}' "$acq" | sort -u | tr '\n' ',' | sed 's/,$//')
+    held=$(grep -c 'DEMO COMPOSITE HELD' "$raw")
+    dups=$(awk '{print $1" "$2}' "$acq" | sort | uniq -d)
+
+    echo "==================== RESULT ===================="
+    echo "acquisitions logged        : $total"
+    echo "distinct nodes acquiring   : $nodes"
+    echo "keys seen                  : $keys"
+    echo "full composites held       : $held"
+    if [ -n "$dups" ]; then echo "DUPLICATE (key,fence):"; echo "$dups" | sed 's/^/  /'; else echo "duplicate (key,fence)      : none"; fi
+    echo "==============================================="
+
+    fail=0
+    [ "$total" -ge "$MIN_ACQ" ] || { echo "FAIL: only $total acquisitions (< $MIN_ACQ) — weak/no liveness"; fail=1; }
+    [ "$nodes" -ge 2 ]         || { echo "FAIL: only $nodes node acquired — no cross-node handoff"; fail=1; }
+    [ -z "$dups" ]             || { echo "FAIL: DUPLICATE (key,fence) -> double-grant -> MUTUAL EXCLUSION VIOLATED"; fail=1; }
+    [ "$fail" = 0 ] && echo "PASS: cross-node mutual exclusion + handoff verified from logs"
+    exit "$fail"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lmx-verify
+  labels:
+    app: live-mutex-distributed
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: live-mutex-distributed
+        role: verify
+    spec:
+      restartPolicy: Never
+      serviceAccountName: lmx-verify
+      containers:
+        - name: verify
+          image: alpine/k8s:1.30.5
+          command: ["sh", "/scripts/verify.sh"]
+          env:
+            - name: WINDOW
+              value: "35"
+            - name: MIN_ACQ
+              value: "15"
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: lmx-verify

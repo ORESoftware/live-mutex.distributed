@@ -1,0 +1,18 @@
+# Headless Service: stable per-pod DNS lmx-<ordinal>.lmx-peers.<ns>.svc.cluster.local
+# publishNotReadyAddresses so the mesh can form during startup and each node can
+# resolve its own name to bind addresses[id].
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmx-peers
+  labels:
+    app: live-mutex-distributed
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: live-mutex-distributed
+  ports:
+    - name: peer
+      port: 9000
+      targetPort: peer

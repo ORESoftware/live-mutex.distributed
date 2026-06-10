@@ -4,7 +4,7 @@ import * as net from 'net';
 import {EventEmitter} from 'events';
 
 import {ConsensusMessage, isConsensusMessage} from './messages';
-import {LMXConsensusNode} from './node';
+import {LMXConsensusNode, QuorumPolicy} from './node';
 import {Instant, LockId, NodeId} from './request-id';
 
 /**
@@ -38,13 +38,18 @@ export class LMXDistributedNode extends EventEmitter {
   /** Messages buffered (in order) for a peer we haven't connected to yet. */
   private readonly pending = new Map<NodeId, ConsensusMessage[]>();
 
-  constructor(id: NodeId, addresses: ReadonlyArray<string>, tickMs = 500) {
+  constructor(
+    id: NodeId,
+    addresses: ReadonlyArray<string>,
+    tickMs = 500,
+    policy: QuorumPolicy = 'majority',
+  ) {
     super();
     this.id = id;
     this.addresses = addresses.slice();
     this.members = addresses.map((_, i) => i);
     this.tickMs = tickMs;
-    this.node = new LMXConsensusNode(id, this.members);
+    this.node = new LMXConsensusNode(id, this.members, policy);
   }
 
   /** Bind, dial peers, and start the lease timer. Resolves once listening. */

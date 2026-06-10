@@ -1,0 +1,79 @@
+# The lmxd peer mesh for live-mutex.distributed. StatefulSet for stable ordinals
+# (= positional node ids) and stable peer DNS. Every node runs the LMX_DEMO
+# contention workload, so the logs continuously show cross-node exclusive handoff
+# of the same composite lock with strictly-increasing per-key fences — which the
+# verify Job scrapes to prove mutual exclusion over the real network.
+#
+# There is NO external client API on the distributed engine yet (see
+# deploy/AUDIT.md), so there is no client Service and the probes are TCP on the
+# peer port (a listening peer socket == the node is up).
+#
+# spec.replicas and LMX_REPLICAS MUST stay in sync.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lmx
+  labels:
+    app: live-mutex-distributed
+spec:
+  serviceName: lmx-peers
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: live-mutex-distributed
+  template:
+    metadata:
+      labels:
+        app: live-mutex-distributed
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: lmxd
+          image: live-mutex-distributed:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: peer
+              containerPort: 9000
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LMX_PEERS_SVC
+              value: lmx-peers
+            - name: LMX_REPLICAS
+              value: "3"            # keep equal to spec.replicas
+            - name: LMX_PEER_PORT
+              value: "9000"
+            - name: LMX_DEMO
+              value: "1"
+            - name: LMX_DEMO_KEYS
+              value: "cap,mid,zed"
+            # Quorum policy: "majority" (floor(n/2)+1) or "grid" (√n Maekawa
+            # row∪column). For a meaningful grid use a square replica count
+            # (e.g. 9 → 3×3) and keep LMX_REPLICAS in sync.
+            - name: LMX_QUORUM_POLICY
+              value: "majority"
+          readinessProbe:
+            tcpSocket:
+              port: peer
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: peer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 48Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi

@@ -1,0 +1,14 @@
+# BuildKit uses <dockerfile>.dockerignore in preference to the root .dockerignore
+# when building with `-f deploy/Dockerfile`. The repo's root .dockerignore excludes
+# src/ (its other images build from a prebuilt dist/), but THIS image compiles
+# from source, so we need src/ + test/ + tsconfigs in the context. We still drop
+# the heavy/irrelevant stuff.
+.git
+node_modules
+**/node_modules
+dist
+lib
+docs
+.idea
+.circleci
+.r2g

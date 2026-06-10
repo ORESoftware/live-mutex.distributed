@@ -1,7 +1,7 @@
 'use strict';
 
 import {Acquired, ConsensusMessage, RENEW_INTERVAL} from './messages';
-import {LMXConsensusNode} from './node';
+import {LMXConsensusNode, QuorumPolicy} from './node';
 import {Fence, Instant, LockId, NodeId} from './request-id';
 
 /**
@@ -21,12 +21,12 @@ export class Sim {
   private clock: Instant = 0;
   private rng: number;
 
-  constructor(n: number, seed = 0x9e3779b9) {
+  constructor(n: number, seed = 0x9e3779b9, policy: QuorumPolicy = 'majority') {
     const members: NodeId[] = [];
     for (let i = 0; i < n; i++) {
       members.push(i);
     }
-    this.nodes = members.map((id) => new LMXConsensusNode(id, members));
+    this.nodes = members.map((id) => new LMXConsensusNode(id, members, policy));
     this.rng = (seed >>> 0) || 0x1234_5678;
   }
 

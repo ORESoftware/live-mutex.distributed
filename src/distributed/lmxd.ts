@@ -27,7 +27,11 @@ function main(): void {
     process.exit(2);
   }
 
-  const node = new LMXDistributedNode(id, addresses);
+  // Quorum policy: LMX_QUORUM_POLICY=grid selects √n Maekawa (row∪column);
+  // anything else (default) keeps majority. Mirrors the Rust lmxd flag.
+  const policyRaw = (process.env.LMX_QUORUM_POLICY || 'majority').trim().toLowerCase();
+  const policy: 'majority' | 'grid' = policyRaw === 'grid' ? 'grid' : 'majority';
+  const node = new LMXDistributedNode(id, addresses, 500, policy);
 
   // Optional self-test workload (LMX_DEMO=1): every node repeatedly acquires the
   // SAME composite (multi-key) lock under contention, so logs show exclusive
