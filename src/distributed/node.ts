@@ -121,9 +121,13 @@ export type QuorumPolicy = 'majority' | 'grid';
 
 /**
  * The √n grid quorum for `id`: every member sharing its row or its column when
- * `members` are packed row-major into a ceil(√n)×ceil(√n) grid. Includes `id`.
- * Deterministic from the ordered member list, so every node computes the
- * identical grid with no coordination.
+ * the membership is packed row-major into a ceil(√n)×ceil(√n) grid. Includes `id`.
+ *
+ * The grid is a function of the membership SET, NOT the order of the input array:
+ * `members` is sorted (numerically) before placement. This is a SAFETY
+ * requirement — differently-ordered member lists on different nodes could yield
+ * row∪column quorums that fail to intersect, letting two nodes hold one lock.
+ * Sorting makes every node compute the identical grid with no coordination.
  */
 export function gridQuorum(id: NodeId, members: ReadonlyArray<NodeId>): NodeId[] {
   const n = members.length;
@@ -131,7 +135,10 @@ export function gridQuorum(id: NodeId, members: ReadonlyArray<NodeId>): NodeId[]
   while (side * side < n) {
     side++;
   }
-  const idx = members.indexOf(id);
+  // Canonical, order-independent layout: sort numerically (NOT default
+  // lexicographic sort, which would order 10 before 2 and break the grid).
+  const sorted = members.slice().sort((a, b) => a - b);
+  const idx = sorted.indexOf(id);
   if (idx < 0) {
     throw new Error('gridQuorum: id must be a member');
   }
@@ -141,16 +148,16 @@ export function gridQuorum(id: NodeId, members: ReadonlyArray<NodeId>): NodeId[]
   const q: NodeId[] = [];
   for (let c = 0; c < side; c++) {
     const i = row * side + c;
-    if (i < n && !seen.has(members[i])) {
-      seen.add(members[i]);
-      q.push(members[i]);
+    if (i < n && !seen.has(sorted[i])) {
+      seen.add(sorted[i]);
+      q.push(sorted[i]);
     }
   }
   for (let r = 0; r < side; r++) {
     const i = r * side + col;
-    if (i < n && !seen.has(members[i])) {
-      seen.add(members[i]);
-      q.push(members[i]);
+    if (i < n && !seen.has(sorted[i])) {
+      seen.add(sorted[i]);
+      q.push(sorted[i]);
     }
   }
   return q;

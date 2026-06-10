@@ -190,6 +190,57 @@ function gridIgnoresOutOfQuorumGrants(): void {
   assert.strictEqual(node.takeAcquired().length, 1, 'must acquire once the full quorum grants');
 }
 
+// ---- hardening: grid is order-independent (C2) ----------------------------
+
+function gridQuorumOrderIndependent(): void {
+  // The grid must depend on the member SET, not input order — else nodes that
+  // received the member list in different orders could build disjoint quorums
+  // and both hold the lock. We sort internally (numerically).
+  for (const n of [4, 5, 9, 16, 25]) {
+    const asc: NodeId[] = [];
+    for (let i = 0; i < n; i++) {
+      asc.push(i);
+    }
+    const desc = asc.slice().reverse();
+    for (let id = 0; id < n; id++) {
+      const a = new Set(gridQuorum(id, asc));
+      const d = new Set(gridQuorum(id, desc));
+      assert.strictEqual(a.size, d.size, `n=${n}: gridQuorum(${id}) size depends on order`);
+      for (const x of a) {
+        assert.ok(d.has(x), `n=${n}: gridQuorum(${id}) depends on input order`);
+      }
+    }
+    // cross-order intersection (i used asc, j used desc)
+    for (let i = 0; i < n; i++) {
+      const qi = new Set(gridQuorum(i, asc));
+      for (let j = 0; j < n; j++) {
+        const qj = gridQuorum(j, desc);
+        assert.ok(qj.some((x) => qi.has(x)), `n=${n}: Q_${i}(asc) and Q_${j}(desc) disjoint`);
+      }
+    }
+  }
+}
+
+// ---- hardening: expected grid unavailability under a line outage (M2) ------
+
+function gridLineOutageWedgesSomeNodes(): void {
+  // grid is LESS available than majority under a full row/column outage. n=9;
+  // crash column {2,5,8} (a minority). Node 0's quorum {0,1,2,3,6} needs node 2,
+  // so it can never acquire — asserted so the tradeoff is explicit.
+  const sim = new Sim(9, 5, 'grid');
+  for (const dead of [2, 5, 8]) {
+    sim.crash(dead);
+  }
+  sim.request(0, 'A');
+  sim.advance(LEASE * 3);
+  for (let i = 0; i < 5000; i++) {
+    if (!sim.step()) {
+      break;
+    }
+  }
+  assert.strictEqual(sim.drainAcquired().length, 0, 'node 0 must NOT acquire (quorum needs dead column)');
+}
+
 // ---- hardening: holder-crash failover under grid --------------------------
 
 function gridStepUntilAcquired(sim: Sim, node: NodeId, lock: string): Fence {
@@ -233,6 +284,10 @@ gridIntersectionSquaresAndNonSquares();
 console.log('  ok  grid_quorums_pairwise_intersect (squares + non-squares)');
 gridIgnoresOutOfQuorumGrants();
 console.log('  ok  grid_ignores_grants_from_outside_quorum');
+gridQuorumOrderIndependent();
+console.log('  ok  grid_quorum_is_order_independent_and_still_intersects');
+gridLineOutageWedgesSomeNodes();
+console.log('  ok  grid_line_outage_wedges_some_nodes (expected tradeoff)');
 gridSurvivorTakesOverAfterHolderCrash();
 console.log('  ok  grid_survivor_takes_over_after_holder_crash');
 gridQuorumSizeForSquares();
