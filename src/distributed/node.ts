@@ -37,6 +37,10 @@ class ReqQueue {
     this.m.delete(reqKey(r));
   }
 
+  isEmpty(): boolean {
+    return this.m.size === 0;
+  }
+
   popMin(): RequestId | undefined {
     let best: RequestId | undefined;
     for (const r of this.m.values()) {
@@ -308,6 +312,17 @@ export class LMXConsensusNode {
       this.send(g.to, {type: ConsensusMsgType.Grant, lock, req: g.req, fence: g.fence});
     }
 
+    // Bound memory: drop arbiter entries that are fully idle AND never recorded a
+    // fence (e.g. created by a spurious Request/Confirm{fence:0} for a lock name
+    // that was never really held). We must NOT prune entries with fenceMax>0 —
+    // that would reset the fence for a previously-used lock and let a token be
+    // reused, defeating the downstream backstop.
+    for (const [lock, a] of this.arbiter) {
+      if (a.votedFor === null && a.queue.isEmpty() && a.fenceMax === 0) {
+        this.arbiter.delete(lock);
+      }
+    }
+
     // Requester role: renew held votes, and re-broadcast any request still
     // acquiring. Re-broadcasting recovers a Request lost while a link was
     // churning (e.g. a rolling restart): receivers de-duplicate it and the
@@ -511,7 +526,10 @@ export class LMXConsensusNode {
     if (r.votes.size >= this.threshold) {
       // Quorum reached — enter the critical section.
       r.locked = true;
-      const token = r.bestFence + 1;
+      // Clamp at MAX_SAFE_INTEGER so a poisoned/huge bestFence can't push the
+      // token into the imprecise-float range (where token+1 === token), which
+      // would let two holders observe the same fence. (Rust uses saturating_add.)
+      const token = Math.min(r.bestFence + 1, Number.MAX_SAFE_INTEGER);
       r.bestFence = token;
       this.acquired.push({lock, fence: token});
       for (const to of r.votes) {
