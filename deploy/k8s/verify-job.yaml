@@ -78,20 +78,43 @@ spec:
         role: verify
     spec:
       restartPolicy: Never
+      # Uses the lmx-verify SA (read-only pods/log RBAC) — it must reach the
+      # Kubernetes API to scrape node logs, so the SA token stays mounted; but it
+      # runs unprivileged and non-root.
       serviceAccountName: lmx-verify
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: verify
           image: alpine/k8s:1.30.5
           command: ["sh", "/scripts/verify.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: WINDOW
               value: "35"
             - name: MIN_ACQ
               value: "15"
+            # kubectl writes its discovery cache under $HOME; point it at a
+            # writable emptyDir since the image's default HOME may not be writable
+            # for an arbitrary non-root UID.
+            - name: HOME
+              value: /tmp
           volumeMounts:
             - name: script
               mountPath: /scripts
+            - name: tmp
+              mountPath: /tmp
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: script
           configMap:
             name: lmx-verify
