@@ -63,28 +63,59 @@ function analyzeMemoryGrowth() {
     console.log(`Heap Growth: ${formatBytes(heapGrowth)} (${heapGrowthPercent.toFixed(2)}%)`);
     console.log(`RSS Growth: ${formatBytes(rssGrowth)} (${rssGrowthPercent.toFixed(2)}%)`);
 
-    // Check for leaks
+    // Leak detection uses ABSOLUTE thresholds first; a percentage is only a
+    // meaningful signal once the baseline heap is large enough that a few MB of
+    // warmup/JIT/GC noise can't dominate it. (A ~3 MB bump on a ~7 MB base is
+    // 50%+ but is not a leak — it's startup allocation.) Mirrors the robust
+    // analyzer in extended-memory-test.js so the two stay consistent.
     let hasLeak = false;
-    if (heapGrowthPercent > 50 || rssGrowthPercent > 50) {
-        console.log('⚠️  WARNING: Significant memory growth detected - potential memory leak!');
+    const warnings = [];
+
+    // Absolute heap growth.
+    if (heapGrowth > 100 * 1024 * 1024) { // 100 MB
+        warnings.push(`⚠️  WARNING: Heap grew by more than 100 MB (${formatBytes(heapGrowth)})`);
         hasLeak = true;
-    } else if (heapGrowthPercent > 20 || rssGrowthPercent > 20) {
-        console.log('⚠️  CAUTION: Moderate memory growth detected');
-    } else {
-        console.log('✓ Memory growth appears normal');
+    } else if (heapGrowth > 50 * 1024 * 1024) { // 50 MB
+        warnings.push(`⚠️  CAUTION: Heap grew by more than 50 MB (${formatBytes(heapGrowth)})`);
     }
 
-    // Check for accelerating growth
-    if (memorySnapshots.length >= 5) {
-        const midPoint = Math.floor(memorySnapshots.length / 2);
-        const mid = memorySnapshots[midPoint];
-        const earlyGrowth = (mid.heapUsed - first.heapUsed) / (mid.timestamp - first.timestamp);
-        const lateGrowth = (last.heapUsed - mid.heapUsed) / (last.timestamp - mid.timestamp);
+    // Percentage growth — only trustworthy when the starting heap was sizeable.
+    if (first.heapUsed > 10 * 1024 * 1024) { // > 10 MB
+        if (heapGrowthPercent > 100) {
+            warnings.push(`⚠️  WARNING: Heap grew by more than 100% (${heapGrowthPercent.toFixed(2)}%)`);
+            hasLeak = true;
+        } else if (heapGrowthPercent > 50) {
+            warnings.push(`⚠️  CAUTION: Heap grew by more than 50% (${heapGrowthPercent.toFixed(2)}%)`);
+        }
+    }
 
-        if (lateGrowth > earlyGrowth * 1.5) {
-            console.log('⚠️  WARNING: Accelerating memory growth detected - likely memory leak!');
+    // Sustained acceleration across thirds of the run (not a single noisy step).
+    if (memorySnapshots.length >= 5) {
+        const seg = Math.floor(memorySnapshots.length / 3);
+        const early = memorySnapshots[seg];
+        const mid = memorySnapshots[seg * 2];
+        const late = last;
+        const earlyGrowth = (early.heapUsed - first.heapUsed) / ((early.timestamp - first.timestamp) / 1000);
+        const midGrowth = (mid.heapUsed - early.heapUsed) / ((mid.timestamp - early.timestamp) / 1000);
+        const lateGrowth = (late.heapUsed - mid.heapUsed) / ((late.timestamp - mid.timestamp) / 1000);
+        if (lateGrowth > midGrowth * 1.5 && lateGrowth > earlyGrowth * 2) {
+            warnings.push('⚠️  WARNING: Accelerating memory growth detected - likely memory leak!');
+            warnings.push(`  Early: ${formatBytes(earlyGrowth)}/s, Mid: ${formatBytes(midGrowth)}/s, Late: ${formatBytes(lateGrowth)}/s`);
             hasLeak = true;
         }
+    }
+
+    // Absolute RSS growth.
+    if (rssGrowth > 200 * 1024 * 1024) { // 200 MB
+        warnings.push(`⚠️  WARNING: RSS grew by more than 200 MB (${formatBytes(rssGrowth)})`);
+        hasLeak = true;
+    }
+
+    if (warnings.length > 0) {
+        console.log('\n=== Warnings ===');
+        warnings.forEach(w => console.log(w));
+    } else {
+        console.log('✓ Memory growth appears normal');
     }
 
     return hasLeak;

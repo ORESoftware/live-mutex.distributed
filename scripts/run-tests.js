@@ -14,6 +14,41 @@ const TEST_TIMEOUT_MS = 60 * 1000; // 60 seconds per test (increased for long-ru
 const INACTIVITY_TIMEOUT_MS = 30 * 1000; // 30 seconds of inactivity
 let currentPort = BASE_PORT;
 
+// Long-running memory/soak tests are diagnostic and run 2–5 min each, so they
+// don't belong under the fast per-test cap. Detect them to (a) exclude them from
+// the default fast gate and (b) give them their full run-duration when invoked
+// via `--soak` / `--all` (npm run test:memory / test:all).
+//
+// NOTE: match only memory/soak tests — NOT "stress". The *-stress-test files
+// (fencing-multikey-stress-test, virtual-socket-stress-test) are fast functional
+// tests that belong in the default gate.
+const SOAK_RE = /(?:memory|soak)/i;
+const isSoak = (f) => SOAK_RE.test(path.basename(f));
+
+const ARGV = process.argv.slice(2);
+const MODE = (ARGV.includes('--all') || process.env.LMX_ALL === '1') ? 'all'
+           : (ARGV.includes('--soak') || process.env.LMX_SOAK === '1') ? 'soak'
+           : 'fast';
+
+// Per-test timeouts. Soak tests get their own TEST_DURATION (parsed from the
+// file) plus a teardown buffer, and a longer inactivity window since they can be
+// quiet between periodic memory snapshots.
+function timeoutsFor(testFile) {
+  if (!isSoak(testFile)) {
+    return { testMs: TEST_TIMEOUT_MS, inactivityMs: INACTIVITY_TIMEOUT_MS };
+  }
+  let durationMs = 0;
+  try {
+    const src = fs.readFileSync(path.join(__dirname, '..', testFile), 'utf8');
+    const m = src.match(/TEST_DURATION\s*=\s*(\d+)/);
+    if (m) durationMs = parseInt(m[1], 10);
+  } catch (e) { /* fall back to the floor below */ }
+  return {
+    testMs: Math.max(durationMs + 120 * 1000, 240 * 1000), // run-duration + 2 min, min 4 min
+    inactivityMs: 90 * 1000,
+  };
+}
+
 // Test files to run (in order) - prefer .ts files
 const TEST_FILES = [
   'test/semaphore-test.ts',
@@ -66,6 +101,7 @@ function runTest(testFile, testNumber, totalTests) {
     
     const startTime = Date.now();
     const testPort = getNextPort();
+    const { testMs: TEST_TIMEOUT, inactivityMs: INACTIVITY_TIMEOUT } = timeoutsFor(testFile);
     let timeoutId = null;
     let killTimeoutId = null;
     let inactivityTimeoutId = null;
@@ -120,12 +156,12 @@ function runTest(testFile, testNumber, totalTests) {
       inactivityTimeoutId = setTimeout(() => {
         if (!resolved) {
           const timeSinceLastOutput = Date.now() - lastOutputTime;
-          if (timeSinceLastOutput >= INACTIVITY_TIMEOUT_MS) {
-            console.error(`\n⏱️  ${testFile} - No stdio output for ${INACTIVITY_TIMEOUT_MS / 1000}s, killing process`);
+          if (timeSinceLastOutput >= INACTIVITY_TIMEOUT) {
+            console.error(`\n⏱️  ${testFile} - No stdio output for ${INACTIVITY_TIMEOUT / 1000}s, killing process`);
             finish(1, true); // Mark as timeout
           }
         }
-      }, INACTIVITY_TIMEOUT_MS);
+      }, INACTIVITY_TIMEOUT);
     };
     
     // Capture and forward stdout - ANY output resets inactivity timer
@@ -209,7 +245,7 @@ function runTest(testFile, testNumber, totalTests) {
     timeoutId = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        console.error(`\n⏱️  ${testFile} timed out after ${TEST_TIMEOUT_MS / 1000}s`);
+        console.error(`\n⏱️  ${testFile} timed out after ${TEST_TIMEOUT / 1000}s`);
         
         // Try graceful shutdown first
         try {
@@ -240,7 +276,7 @@ function runTest(testFile, testNumber, totalTests) {
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
         resolve({ file: testFile, passed: false, duration, timeout: true });
       }
-    }, TEST_TIMEOUT_MS);
+    }, TEST_TIMEOUT);
     
     let completionTimeout = null;
     
@@ -438,13 +474,18 @@ async function main() {
     }
   }
   
-  // Filter to only files that exist
+  // Filter to only files that exist, then apply the run mode: fast (default)
+  // excludes soak/memory tests, soak runs only them, all runs everything.
   const existingTests = allTestFiles.filter(file => {
     const fullPath = path.join(__dirname, '..', file);
-    return fs.existsSync(fullPath);
+    if (!fs.existsSync(fullPath)) return false;
+    if (MODE === 'fast') return !isSoak(file);
+    if (MODE === 'soak') return isSoak(file);
+    return true;
   });
-  
-  console.log(`Found ${existingTests.length} test file(s) to run\n`);
+
+  console.log(`Mode: ${MODE}. Found ${existingTests.length} test file(s) to run` +
+    (MODE === 'fast' ? ' (soak/memory tests excluded — run `npm run test:memory`)' : '') + '\n');
   
   const results = [];
   

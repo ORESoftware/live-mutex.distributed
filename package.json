@@ -43,6 +43,8 @@
     "compile:check": "tsc --noEmit",
     "build": "npm run compile && npm run compile:esm && node scripts/add-esm-extensions.js && node scripts/fix-commonjs-import-meta.js",
     "test": "node scripts/run-tests.js",
+    "test:memory": "node scripts/run-tests.js --soak",
+    "test:all": "node scripts/run-tests.js --all",
     "test:old": "./scripts/test.sh",
     "postinstall": "./assets/postinstall.sh"
   },
