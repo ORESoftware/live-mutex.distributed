@@ -343,22 +343,25 @@ export class Client {
       }
       
       if (!ws.writable) {
-        return this.ensure((err, val) => {
+        return this.ensure((err) => {
           if (err) {
-            throw new Error('Could not reconnect.');
+            // NB: throwing here would surface as an uncaught exception (this runs
+            // on a later tick inside the ensure() callback) and crash the process.
+            // Surface the failure to the caller / warning listeners instead.
+            const e = 'lmx client: could not reconnect to the broker before sending request: ' + inspectError(err);
+            this.emitter.emit('warning', e);
+            if (typeof cb === 'function') {
+              cb(e);
+            }
+            return;
           }
           this.write(data, cb);
         });
       }
-      
+
       data.max = data.max || null;
-      // Forward maxRead and maxWrite if provided (for RW locks)
-      if (data.maxRead !== undefined) {
-        data.maxRead = data.maxRead;
-      }
-      if (data.maxWrite !== undefined) {
-        data.maxWrite = data.maxWrite;
-      }
+      // maxRead / maxWrite (for RW locks) are already on `data` when the caller
+      // set them; no normalization needed here.
       data.pid = process.pid;
       
       if (data.ttl === Infinity) {
@@ -499,13 +502,19 @@ export class Client {
         
         const onFirstErr = (e: Error) => {
           this.noRecover = true;
+          clearTimeout(to);
           const err = 'lmx client error: ' + inspectError(e);
           this.emitter.emit('warning', err);
           reject(err);
         };
-        
-        const to = setTimeout(function () {
-          reject('lmx client err: client connection timeout after 3000ms.');
+
+        const to = setTimeout(() => {
+          // Tear down the half-open socket so a stalled connect doesn't leak a
+          // dangling, still-connecting net.Socket.
+          if (ws && !ws.destroyed) {
+            try { ws.destroy(); } catch (ignored) {}
+          }
+          reject(`lmx client err: client connection timeout after ${this.connectTimeout}ms.`);
         }, this.connectTimeout);
         
         const cnkt = self.socketFile ? [self.socketFile] : [self.port, self.host];
@@ -536,7 +545,8 @@ export class Client {
           }
           
           called = true;
-          
+          clearTimeout(to);
+
           if (this.noRecover) {
             return;
           }
@@ -712,10 +722,11 @@ export class Client {
     const uuid = opts._uuid || UUID.v4();
     
     this.resolutions[uuid] = (err, data) => {
-      
+
       clearTimeout(this.timers[uuid]);
+      delete this.timers[uuid];
       delete this.timeouts[uuid];
-      
+
       if (err) {
         return this.fireCallbackWithError(cb, false, new LMXClientException(
           key,
@@ -727,16 +738,29 @@ export class Client {
       }
       
       if (String(key) !== String(data.key)) {
-        delete this.resolutions[uuid];
-        throw new Error('lmx implementation error => bad key.');
+        // A throw here would propagate out of the parser's 'data' handler and
+        // crash the process on a malformed/cross-talk broker reply. Report it.
+        return this.fireCallbackWithError(cb, false, new LMXClientException(
+          key,
+          uuid,
+          LMXClientError.UnknownError,
+          `lmx internal error: lock-info reply key mismatch => '${key}' vs '${data.key}'.`,
+          null
+        ));
       }
-      
+
       if (data.error) {
         this.emitter.emit('warning', data.error);
       }
-      
+
       if ([data.acquired, data.retry].filter(Boolean).length > 1) {
-        throw new Error('lmx implementation error, both "acquired" and "retry" options provided, there can be only one.');
+        return this.fireCallbackWithError(cb, false, new LMXClientException(
+          key,
+          uuid,
+          LMXClientError.UnknownError,
+          'lmx internal error: lock-info reply has both "acquired" and "retry" set; only one is valid.',
+          null
+        ));
       }
       
       if (data.lockInfo === true) {
@@ -744,13 +768,25 @@ export class Client {
         cb(null, {data});
       }
     };
-    
+
+    // Bound the request: without this, an unresponsive broker leaves the
+    // resolution entry (and the user callback) dangling forever.
+    this.timers[uuid] = setTimeout(() => {
+      this.fireCallbackWithError(cb, false, new LMXClientException(
+        key,
+        uuid,
+        LMXClientError.UnknownError,
+        `lmx client: lock-info request for key "${key}" timed out after ${this.unlockRequestTimeout}ms.`,
+        null
+      ));
+    }, this.unlockRequestTimeout);
+
     this.write({
       uuid: uuid,
       key: key,
       type: LMXRequestType.LockInfoRequest,
     });
-    
+
   }
   
   acquire(key: string, opts?: Partial<LMXClientLockOpts>): Promise<LMLockSuccessData> {
@@ -911,15 +947,36 @@ export class Client {
     
     opts = opts || {};
     const id = UUID.v4();
-    
-    this.resolutions[id] = cb;
-    
+    const lsTimeout = this.unlockRequestTimeout;
+    const userCb = cb;
+    let settled = false;
+
+    this.timers[id] = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      delete this.timers[id];
+      delete this.resolutions[id];
+      userCb(new Error(`lmx client: "ls" request timed out after ${lsTimeout}ms (no response from broker).`));
+    }, lsTimeout);
+
+    // onData never deletes resolution entries itself, so wrap the user callback
+    // to tear down the timer + resolution exactly once (otherwise every ls()
+    // call leaks an entry in the resolutions map).
+    this.resolutions[id] = (err, data) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(this.timers[id]);
+      delete this.timers[id];
+      delete this.resolutions[id];
+      userCb(err, data);
+    };
+
     this.write({
       keepLocksAfterDeath: opts.keepLocksAfterDeath,
       uuid: id,
       type: LMXRequestType.Ls,
     });
-    
+
   }
   
   protected preParseLockOptsForPromises(
@@ -1653,15 +1710,24 @@ export class Client {
 
       const uuid = UUID.v4();
       const clientTimestamp = Date.now();
+      const pingTimeout = this.unlockRequestTimeout;
+
+      // Without a timeout a silent/dead broker leaves this promise pending
+      // forever and the resolution entry leaks.
+      const timer = setTimeout(() => {
+        delete this.resolutions[uuid];
+        reject(new Error(`lmx ping timed out after ${pingTimeout}ms (no pong from broker).`));
+      }, pingTimeout);
 
       this.resolutions[uuid] = (err, data) => {
+        clearTimeout(timer);
         delete this.resolutions[uuid];
 
         if (err) {
           return reject( new Error(`Ping error: ${util.inspect(err)}`));
         }
 
-        if (!data || data.type !== 'pong') {
+        if (!data || data.type !== LMXResponseType.Pong) {
           return reject( new Error('Invalid ping response from server'));
         }
 
@@ -1702,15 +1768,24 @@ export class Client {
       }
 
       const uuid = UUID.v4();
+      const statsTimeout = this.unlockRequestTimeout;
+
+      // Without a timeout a silent/dead broker leaves this promise pending
+      // forever and the resolution entry leaks.
+      const timer = setTimeout(() => {
+        delete this.resolutions[uuid];
+        reject(new Error(`lmx system-stats request timed out after ${statsTimeout}ms (no response from broker).`));
+      }, statsTimeout);
 
       this.resolutions[uuid] = (err, data) => {
+        clearTimeout(timer);
         delete this.resolutions[uuid];
 
         if (err) {
           return reject(new Error(`System stats error: ${util.inspect(err)}`));
         }
 
-        if (!data || data.type !== 'system-stats-response') {
+        if (!data || data.type !== LMXResponseType.SystemStatsResponse) {
           return reject(new Error('Invalid system stats response from server'));
         }
 
