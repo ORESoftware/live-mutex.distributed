@@ -98,3 +98,13 @@ spec:
             limits:
               cpu: "1"
               memory: 256Mi
+          # readOnlyRootFilesystem is on; give Node a small writable tmpfs for any
+          # /tmp scratch (and to keep the runtime read-only otherwise).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
