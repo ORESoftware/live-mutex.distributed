@@ -28,10 +28,28 @@ spec:
         app: live-mutex-distributed
     spec:
       terminationGracePeriodSeconds: 5
+      # Hardening: no Kubernetes API access, no privileges, read-only rootfs
+      # (the node holds only in-memory state). Matches the raft gold standard.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: lmxd
           image: live-mutex-distributed:dev
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: peer
               containerPort: 9000

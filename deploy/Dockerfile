@@ -26,7 +26,12 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 COPY --from=builder /build/dist ./dist
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0555 /usr/local/bin/docker-entrypoint.sh
+
+# Run as a non-root, unprivileged numeric UID. The node binds only a high port
+# (9000), holds no on-disk state, and the entrypoint only reads DNS — so this
+# works with a read-only root filesystem (see the StatefulSet securityContext).
+USER 65532:65532
 
 EXPOSE 9000
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
