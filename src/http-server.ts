@@ -1,17 +1,31 @@
 'use strict';
 
 
+import * as crypto from 'crypto';
 import {routineEnter, isOtelEnabled, setOtelEnabled} from './routine';
 import {getLogLevel, setLogLevel, LMXLogLevel} from './log-level';
 
-/// Shared admin token used to gate `/admin/*` endpoints. Defaults to
-/// the literal string the user explicitly chose; operators can
-/// override via the `LMX_ADMIN_TOKEN` env var without rebuilding.
-/// Compared against the inbound `x-admin-token` header (or the
-/// `Authorization: Bearer …` header) on every admin request.
-function adminToken(): string {
+/// Admin token gating `/admin/*`. Returns the operator-set `LMX_ADMIN_TOKEN`,
+/// or `null` when it is unset — in which case the admin endpoints are DISABLED
+/// (we no longer fall back to a token published in the source, which anyone
+/// could read and use). Set `LMX_ADMIN_TOKEN` to enable `/admin/*`.
+function adminToken(): string | null {
     const env = process.env.LMX_ADMIN_TOKEN;
-    return env && env.trim() ? env.trim() : 'all-dogs-go-to-heaven';
+    return env && env.trim() ? env.trim() : null;
+}
+
+/// Constant-time string compare (avoids leaking the token via response timing).
+/// Returns false on length mismatch without an early-exit timing signal on the
+/// equal-length path.
+function tokensMatch(provided: string, expected: string): boolean {
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) {
+        // Still do a compare against `b` so the fast path isn't obviously shorter.
+        crypto.timingSafeEqual(b, b);
+        return false;
+    }
+    return crypto.timingSafeEqual(a, b);
 }
 /**
  * Optional HTTP front-end for live-mutex.

@@ -1580,7 +1580,13 @@ export class Broker1 {
                     const ln = lckTemp.notify.length;
                     const notifyList = lckTemp.notify;
 
-                    if (hadHolder && !self.rejected[uuid]) {
+                    // `rejected[uuid]` is a one-shot signal: consume it here (and
+                    // delete it) so the map can't grow without bound for the life
+                    // of the broker process. Once the holder is removed the flag
+                    // has served its purpose.
+                    const wasRejected = !!self.rejected[uuid];
+                    delete self.rejected[uuid];
+                    if (hadHolder && !wasRejected) {
                         // Re-queue this request if it was removed
                         const lockholder = lckTemp.lockholders.get(uuid);
                         if (!lockholder && !notifyList.contains(uuid)) {
