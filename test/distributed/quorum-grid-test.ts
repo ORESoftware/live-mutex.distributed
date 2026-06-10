@@ -9,8 +9,9 @@
 
 import * as assert from 'assert';
 import {Sim} from '../../src/distributed/sim';
-import {gridQuorum} from '../../src/distributed/node';
-import {Fence, NodeId} from '../../src/distributed/request-id';
+import {gridQuorum, LMXConsensusNode} from '../../src/distributed/node';
+import {ConsensusMsgType, LEASE} from '../../src/distributed/messages';
+import {Fence, NodeId, RequestId} from '../../src/distributed/request-id';
 
 // ---- 1. intersection -------------------------------------------------------
 
@@ -150,8 +151,49 @@ function gridIndependentLocks(): void {
   }
 }
 
+// ---- hardening: out-of-quorum grants must be ignored ----------------------
+
+function gridIgnoresOutOfQuorumGrants(): void {
+  // If a grid node counted a grant from OUTSIDE its quorum, `votes >= threshold`
+  // could be reached without true quorum coverage and two non-intersecting vote
+  // sets could both acquire. The guard must drop such grants. n=16 → non-quorum
+  // (9) is larger than threshold (7).
+  const n = 16;
+  const members: NodeId[] = [];
+  for (let i = 0; i < n; i++) {
+    members.push(i);
+  }
+  const node = new LMXConsensusNode(0, members, 'grid');
+  const q = new Set(gridQuorum(0, members));
+  const threshold = node.quorumSize();
+
+  node.request(0, 'L');
+  let req: RequestId | null = null;
+  for (const o of node.drainOutbox()) {
+    if (o.msg.type === ConsensusMsgType.Request) {
+      req = o.msg.req;
+      break;
+    }
+  }
+  assert.ok(req, 'request() must emit a Request');
+
+  const nonQ = members.filter((m) => !q.has(m));
+  assert.ok(nonQ.length >= threshold, 'precondition: |non-quorum| >= threshold');
+  for (let k = 0; k < threshold; k++) {
+    node.handle(0, nonQ[k], {type: ConsensusMsgType.Grant, lock: 'L', req: req!, fence: 0});
+  }
+  assert.strictEqual(node.takeAcquired().length, 0, 'SAFETY: acquired from out-of-quorum grants');
+
+  for (const m of q) {
+    node.handle(0, m, {type: ConsensusMsgType.Grant, lock: 'L', req: req!, fence: 0});
+  }
+  assert.strictEqual(node.takeAcquired().length, 1, 'must acquire once the full quorum grants');
+}
+
 gridIntersectionSquaresAndNonSquares();
 console.log('  ok  grid_quorums_pairwise_intersect (squares + non-squares)');
+gridIgnoresOutOfQuorumGrants();
+console.log('  ok  grid_ignores_grants_from_outside_quorum');
 gridQuorumSizeForSquares();
 console.log('  ok  grid_quorum_size_is_2sqrt_n_for_squares');
 gridSingleLockManySizes();

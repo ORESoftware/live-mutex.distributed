@@ -111,6 +111,11 @@ interface GrantOut {
  *  - `'grid'`: √n Maekawa — pack members row-major into a ceil(√n)×ceil(√n)
  *    grid; a node's quorum is its row ∪ column (≈ 2√n−1 nodes, all of which
  *    must grant). Any two row∪column sets intersect. O(√n) messages.
+ *
+ * SAFETY: the policy MUST be identical on every node in a cluster. A 'grid'
+ * quorum and a 'majority' quorum are NOT guaranteed to intersect, so a mixed
+ * cluster can grant the same lock to two holders. Never switch policy with a
+ * rolling update; drain and restart the whole cluster instead.
  */
 export type QuorumPolicy = 'majority' | 'grid';
 
@@ -159,6 +164,11 @@ export class LMXConsensusNode {
   private readonly targets: ReadonlyArray<NodeId>;
   /** Grants needed to hold a lock (majority count, or |row∪col| under grid). */
   private readonly threshold: number;
+  /** `targets` as a set, for O(1) membership checks on the grant/revoke hot path
+   * and as a safety guard: votes are only counted from nodes in this set, so
+   * `votes.size >= threshold` can never be satisfied by a grant from OUTSIDE the
+   * quorum (which would break the quorum-intersection invariant). */
+  private readonly targetSet: Set<NodeId>;
   private readonly policy: QuorumPolicy;
   private lamport: Lamport = 0;
   private readonly arbiter = new Map<LockId, ArbiterState>();
@@ -184,6 +194,7 @@ export class LMXConsensusNode {
       this.targets = this.members;
       this.threshold = Math.floor(members.length / 2) + 1;
     }
+    this.targetSet = new Set(this.targets);
   }
 
   /** Grants needed to hold a lock: `floor(n/2)+1` (majority) or `|row∪col|` (grid). */
@@ -468,6 +479,11 @@ export class LMXConsensusNode {
   // ---- requester role --------------------------------------------------
 
   private onGrant(from: NodeId, lock: LockId, req: RequestId, fence: Fence): void {
+    // Safety guard: only count votes from arbiters in our quorum set, so a grant
+    // from outside the quorum can never contribute to reaching `threshold`.
+    if (!this.targetSet.has(from)) {
+      return;
+    }
     const r = this.requester.get(lock);
     if (!r || !reqEq(r.req, req)) {
       return; // grant for a superseded request
@@ -525,6 +541,10 @@ export class LMXConsensusNode {
   }
 
   private onRevoked(from: NodeId, lock: LockId, req: RequestId): void {
+    // Mirror the onGrant guard: only quorum members ever held our votes.
+    if (!this.targetSet.has(from)) {
+      return;
+    }
     const r = this.requester.get(lock);
     if (!r || !reqEq(r.req, req)) {
       return;
