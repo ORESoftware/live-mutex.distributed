@@ -1644,7 +1644,10 @@ export class Broker1 {
         const lck = this.locks.get(key);
         const uuid = data.uuid;
 
-        const lockholderUUIDs = Object.keys(lck || {});
+        // Holders live in the `lockholders` Map; `Object.keys(lck)` would return
+        // the LockObj's own field names (readers/max/notify/...), making every
+        // ever-created key report isLocked:true with a bogus holder list.
+        const lockholderUUIDs = lck ? [...lck.lockholders.keys()] : [];
         const isLocked = lockholderUUIDs.length > 0;
         const lockRequestCount = lck ? lck.notify.length : null;
 
@@ -2208,9 +2211,13 @@ export class Broker1 {
 
         const uuid = data.uuid;
         const pid = data.pid;
-        const max = data.max;  // max lockholders (legacy)
-        const maxRead = data.maxRead;  // max concurrent readers
-        const maxWrite = data.maxWrite;  // max concurrent writers
+        // Clamp client-supplied bounds to maxConcurrencyCap. clampMax() existed
+        // but was never called, so a client could request a 2-billion-holder
+        // semaphore. Only clamp real integers — undefined/null are sentinels for
+        // "use default" downstream (Number.isInteger gates the stores below).
+        const max = Number.isInteger(data.max) ? this.clampMax(data.max) : data.max;  // max lockholders (legacy)
+        const maxRead = Number.isInteger(data.maxRead) ? this.clampMax(data.maxRead) : data.maxRead;  // max concurrent readers
+        const maxWrite = Number.isInteger(data.maxWrite) ? this.clampMax(data.maxWrite) : data.maxWrite;  // max concurrent writers
         const beginRead = data.rwStatus === RWStatus.BeginRead;
         const endRead = data.rwStatus === RWStatus.EndRead;
 
