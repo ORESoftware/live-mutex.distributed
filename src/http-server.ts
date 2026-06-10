@@ -434,10 +434,18 @@ export class LMXHttpServer {
         const routineId = 'ddl-routine-checkAdminAuth-Up7';
         routineEnter(routineId, "LMXHttpServer.checkAdminAuth");
         const expected = adminToken();
+        if (!expected) {
+            // No token configured -> admin surface is disabled, not open.
+            this.respondJson(res, 403, {
+                error: 'admin endpoints are disabled; set LMX_ADMIN_TOKEN to enable `/admin/*`.',
+            });
+            return false;
+        }
         const headerToken = (req.headers['x-admin-token'] || '').toString().trim();
         const authHeader = (req.headers['authorization'] || '').toString().trim();
         const bearerToken = /^Bearer\s+(.+)$/i.exec(authHeader)?.[1]?.trim() || '';
-        if (headerToken === expected || bearerToken === expected) {
+        const provided = headerToken || bearerToken;
+        if (provided && tokensMatch(provided, expected)) {
             return true;
         }
         this.respondJson(res, 401, {
