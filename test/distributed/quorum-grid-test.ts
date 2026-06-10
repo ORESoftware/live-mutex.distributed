@@ -190,10 +190,51 @@ function gridIgnoresOutOfQuorumGrants(): void {
   assert.strictEqual(node.takeAcquired().length, 1, 'must acquire once the full quorum grants');
 }
 
+// ---- hardening: holder-crash failover under grid --------------------------
+
+function gridStepUntilAcquired(sim: Sim, node: NodeId, lock: string): Fence {
+  for (let i = 0; i < 1_000_000; i++) {
+    for (const a of sim.drainAcquired()) {
+      if (a.node === node && a.lock === lock) {
+        return a.fence;
+      }
+    }
+    if (!sim.step()) {
+      break;
+    }
+  }
+  throw new Error(`node ${node} never acquired ${lock} (grid)`);
+}
+
+function gridSurvivorTakesOverAfterHolderCrash(): void {
+  // n=4 → 2×2 grid: Q_0={0,1,2}, Q_3={1,2,3}. Q_3 excludes node 0, so after the
+  // holder (node 0) crashes and its leases lapse, node 3 takes over with a
+  // strictly greater fence.
+  const sim = new Sim(4, 7, 'grid');
+  sim.request(0, 'A');
+  const token0 = gridStepUntilAcquired(sim, 0, 'A');
+
+  sim.request(3, 'A');
+  for (let i = 0; i < 1000; i++) {
+    if (!sim.step()) {
+      break;
+    }
+  }
+  assert.strictEqual(sim.drainAcquired().length, 0, 'node 3 must wait while node 0 holds (grid)');
+
+  sim.crash(0);
+  sim.advance(LEASE * 2);
+
+  const token3 = gridStepUntilAcquired(sim, 3, 'A');
+  assert.ok(token3 > token0, `fence must increase across grid failover: ${token0} -> ${token3}`);
+}
+
 gridIntersectionSquaresAndNonSquares();
 console.log('  ok  grid_quorums_pairwise_intersect (squares + non-squares)');
 gridIgnoresOutOfQuorumGrants();
 console.log('  ok  grid_ignores_grants_from_outside_quorum');
+gridSurvivorTakesOverAfterHolderCrash();
+console.log('  ok  grid_survivor_takes_over_after_holder_crash');
 gridQuorumSizeForSquares();
 console.log('  ok  grid_quorum_size_is_2sqrt_n_for_squares');
 gridSingleLockManySizes();
