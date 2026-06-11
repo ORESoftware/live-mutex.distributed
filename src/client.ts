@@ -335,6 +335,20 @@ export class Client {
         log.warn('Add a "warning" event listener to the lmx client to get rid of this message.');
       }
     });
+
+    // Node's EventEmitter THROWS when 'error' is emitted with no registered
+    // listener. The client emits 'error' from the broker-message path (broker
+    // error field, version mismatch, malformed frame), so without this default
+    // listener any consumer that didn't call onError()/emitter.on('error') would
+    // crash the whole process on a routine broker error. Mirror the 'warning'
+    // handler: log only when we're the sole listener.
+    this.emitter.on('error', function () {
+      if (self.emitter.listenerCount('error') < 2) {
+        log.error('No "error" event handler(s) attached by end-user to client.emitter, therefore logging these errors from LMX library:');
+        log.error(...Array.from(arguments).map(v => (typeof v === 'string' ? v : util.inspect(v))));
+        log.error('Add an "error" event listener to the lmx client to get rid of this message.');
+      }
+    });
     
     this.write = (data: any, cb?: EVCb<any>) => {
       
@@ -343,7 +357,7 @@ export class Client {
       }
       
       if (!ws.writable) {
-        return this.ensure((err) => {
+        this.ensure((err) => {
           if (err) {
             // NB: throwing here would surface as an uncaught exception (this runs
             // on a later tick inside the ensure() callback) and crash the process.
@@ -356,7 +370,11 @@ export class Client {
             return;
           }
           this.write(data, cb);
+        }).catch(() => {
+          // Failure already surfaced to the caller via the ensure() callback
+          // above; swallow the returned rejection so it isn't unhandled.
         });
+        return;
       }
 
       data.max = data.max || null;
@@ -379,14 +397,19 @@ export class Client {
     };
     
     const onData = (data: any) => {
-      
+
+      // Guard BEFORE touching data.* — a null/primitive frame (a broker bug, or
+      // anything else writing to this TCP port, e.g. `echo null | nc`) would
+      // otherwise throw a TypeError right here and crash the parser's 'data'
+      // handler. Treat a malformed frame as a recoverable warning, not fatal.
+      if (!(data && typeof data === 'object')) {
+        return this.emitter.emit('warning',
+          'lmx client: ignoring non-object message from broker => ' + util.inspect(data));
+      }
+
       const uuid = data.uuid;
       const _uuid = data._uuid;
-      
-      if (!(data && typeof data === 'object')) {
-        return this.emitter.emit('error', 'Internal error -> data was not an object.');
-      }
-      
+
       if (data.error) {
         this.emitter.emit('error', data.error);
       }
@@ -570,6 +593,11 @@ export class Client {
           // create new connection
           this.ensure().then(() => {
             log.debug('new connection created, via recover routine.');
+          }).catch((err: any) => {
+            // recover() is library-initiated, so a rejection here is an unhandled
+            // promise rejection -> process termination on Node >=15. Surface it as
+            // a warning; in-flight callbacks were already errored above.
+            this.emitter.emit('warning', 'lmx client: reconnect attempt (recover) failed: ' + inspectError(err));
           });
         };
         
@@ -643,8 +671,13 @@ export class Client {
     
     // if the user passes a callback, we call connect here
     // on behalf of the user
-    cb && this.connect(cb);
-    
+    if (cb) {
+      // connect() delivers any error to `cb`, but the promise it returns also
+      // rejects; swallow that rejection so it isn't an unhandled promise
+      // rejection (which terminates the process on Node >=15).
+      this.connect(cb).catch(() => {});
+    }
+
   };
   
   private onSocketDestroy(err: any) {
@@ -717,8 +750,10 @@ export class Client {
       cb = opts;
       opts = {};
     }
-    
+
     opts = opts || {};
+    assert.strict(typeof cb === 'function',
+      'lmx client: requestLockInfo requires a callback function as its final argument.');
     const uuid = opts._uuid || UUID.v4();
     
     this.resolutions[uuid] = (err, data) => {
