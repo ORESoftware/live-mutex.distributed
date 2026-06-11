@@ -437,7 +437,10 @@ export class Client {
       const to = this.timeouts[uuid];
       
       // Debug logging for RW lock operations
-      if (data.type && (data.type.includes('readers') || data.type.includes('write-flag') || data.type.includes('register'))) {
+      // NB: guard for a *string* type — a malformed frame can carry a non-string
+      // `data.type` (e.g. a number), and `.includes()` on that would throw a
+      // TypeError straight out of the parser's 'data' handler and crash the process.
+      if (typeof data.type === 'string' && (data.type.includes('readers') || data.type.includes('write-flag') || data.type.includes('register'))) {
         log.debug(chalk.yellow('[CLIENT] Received RW message'), {uuid, type: data.type, key: data.key, hasFn: !!fn, hasTimeout: !!to});
       }
       
@@ -755,7 +758,8 @@ export class Client {
     assert.strict(typeof cb === 'function',
       'lmx client: requestLockInfo requires a callback function as its final argument.');
     const uuid = opts._uuid || UUID.v4();
-    
+    let settled = false;
+
     this.resolutions[uuid] = (err, data) => {
 
       clearTimeout(this.timers[uuid]);
@@ -771,7 +775,7 @@ export class Client {
           `Unknown error - see included "originalError" object.)`
         ));
       }
-      
+
       if (String(key) !== String(data.key)) {
         // A throw here would propagate out of the parser's 'data' handler and
         // crash the process on a malformed/cross-talk broker reply. Report it.
@@ -797,16 +801,26 @@ export class Client {
           null
         ));
       }
-      
+
       if (data.lockInfo === true) {
+        settled = true;
         delete this.resolutions[uuid];
         cb(null, {data});
+        return;
       }
+
+      // A reply that is neither an error nor the final lock-info payload is not
+      // terminal — keep the resolution entry, but re-arm the timeout we just
+      // cleared above so a broker that never sends the final frame can't leak
+      // this entry (and its user callback) forever.
+      this.timers[uuid] = setTimeout(onLockInfoTimeout, this.unlockRequestTimeout);
     };
 
     // Bound the request: without this, an unresponsive broker leaves the
     // resolution entry (and the user callback) dangling forever.
-    this.timers[uuid] = setTimeout(() => {
+    const onLockInfoTimeout = () => {
+      if (settled) return;
+      settled = true;
       this.fireCallbackWithError(cb, false, new LMXClientException(
         key,
         uuid,
@@ -814,7 +828,8 @@ export class Client {
         `lmx client: lock-info request for key "${key}" timed out after ${this.unlockRequestTimeout}ms.`,
         null
       ));
-    }, this.unlockRequestTimeout);
+    };
+    this.timers[uuid] = setTimeout(onLockInfoTimeout, this.unlockRequestTimeout);
 
     this.write({
       uuid: uuid,
