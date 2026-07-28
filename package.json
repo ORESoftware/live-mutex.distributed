@@ -40,8 +40,13 @@
     "compile:watch": "tsc --watch",
     "compile:test": "tsc --project tsconfig.test.json",
     "compile:all": "npm run compile && npm run compile:test",
-    "compile:check": "tsc --noEmit",
+    "compile:check": "npm run check:cli-types && tsc --noEmit",
     "build": "npm run compile && npm run compile:esm && node scripts/add-esm-extensions.js && node scripts/fix-commonjs-import-meta.js",
+    "check:cli-types": "node scripts/sync-broker-cli-config.js --check",
+    "generate:cli-types": "node scripts/sync-broker-cli-config.js --write",
+    "prebuild": "npm run check:cli-types",
+    "prepack": "npm run check:cli-types && npm run build",
+    "pretest": "npm run check:cli-types",
     "test": "node scripts/run-tests.js",
     "test:memory": "node scripts/run-tests.js --soak",
     "test:all": "node scripts/run-tests.js --all",
@@ -61,13 +66,16 @@
     "url": "https://github.com/ORESoftware/live-mutex/issues"
   },
   "homepage": "https://github.com/ORESoftware/live-mutex#readme",
+  "engines": {
+    "node": ">=22.9.0"
+  },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.55.0",
     "@opentelemetry/resources": "^1.28.0",
     "@opentelemetry/sdk-trace-base": "^1.28.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "@oresoftware/f2e": "https://github.com/ORESoftware/flags-2-env/tarball/96af0e0ac178f1c0b496a6f6a4fef07a124e8be0",
+    "@oresoftware/f2e": "https://github.com/ORESoftware/flags-2-env/tarball/9483b92c1fb259f598858fdd2bef66417d87fb2c",
     "@oresoftware/json-stream-parser": "0.1.136",
     "@oresoftware/linked-queue": "^2.2.13",
     "chalk": "^2.4.2",

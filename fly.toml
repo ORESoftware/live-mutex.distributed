@@ -4,6 +4,8 @@ app = 'live-mutex'
 primary_region = 'gru'
 
 [build]
+  dockerfile = "Dockerfile.image"
+  ignorefile = "Dockerfile.image.dockerignore"
 
 [deploy]
   strategy = "immediate"

@@ -5,7 +5,8 @@
  * and `/admin/tcp`, plus the HTMX-driven status-page UI.
  *
  * Asserts:
- *   1. `/admin/log-level` requires a token (401 without).
+ *   1. Admin endpoints are disabled with 403 until `LMX_ADMIN_TOKEN`
+ *      is configured, then reject missing credentials with 401.
  *   2. Authenticated GET returns the current level.
  *   3. POST `{"level":"warn"}` (JSON) updates the level and reports
  *      the previous value for audit.
@@ -125,6 +126,8 @@ function httpForm(
 
 async function main() {
     const TOKEN = 'all-dogs-go-to-heaven';
+    const previousAdminToken = process.env.LMX_ADMIN_TOKEN;
+    delete process.env.LMX_ADMIN_TOKEN;
     setLogLevel('info');
 
     const broker = new Broker1({noListen: true, port: 0, host: '127.0.0.1'});
@@ -139,6 +142,14 @@ async function main() {
     if (!port) fail('HTTP server did not bind a port');
 
     try {
+        {
+            const disabled = await httpJson(port, 'GET', '/admin/log-level', {});
+            assert.strictEqual(disabled.status, 403,
+                'admin endpoints should be disabled when LMX_ADMIN_TOKEN is unset');
+            ok('/admin/log-level is disabled until LMX_ADMIN_TOKEN is configured');
+        }
+        process.env.LMX_ADMIN_TOKEN = TOKEN;
+
         // --- /admin/log-level (legacy JSON path) --------------------
         {
             const get401 = await httpJson(port, 'GET', '/admin/log-level', {});
@@ -397,6 +408,11 @@ async function main() {
 
         console.log('\n\u2705 admin-controls-test: all checks passed');
     } finally {
+        if (previousAdminToken === undefined) {
+            delete process.env.LMX_ADMIN_TOKEN;
+        } else {
+            process.env.LMX_ADMIN_TOKEN = previousAdminToken;
+        }
         await httpServer.stop();
         broker.close(null);
     }

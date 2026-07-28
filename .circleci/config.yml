@@ -1,48 +1,33 @@
-version: 2
+version: 2.1
+
 jobs:
-  build-node8:
+  build:
+    parameters:
+      node-tag:
+        type: string
     docker:
-      - image: oresoftware/lmx-circleci:8
+      - image: cimg/node:<< parameters.node-tag >>
     steps:
       - checkout
-      - run: ./scripts/circleci/run.sh
-  build-node9:
-    docker:
-      - image: oresoftware/lmx-circleci:9
-    steps:
-      - checkout
-      - run: ./scripts/circleci/run.sh
-  build-node10:
-    docker:
-      - image: oresoftware/lmx-circleci:10
-    steps:
-      - checkout
-      - run: ./scripts/circleci/run.sh
-  build-node11:
-    docker:
-      - image: oresoftware/lmx-circleci:11
-    steps:
-      - checkout
-      - run: ./scripts/circleci/run.sh
-  build-node12:
-    docker:
-      - image: oresoftware/lmx-circleci:12
-    steps:
-      - checkout
-      - run: ./scripts/circleci/run.sh
-  build-node13:
-    docker:
-      - image: oresoftware/lmx-circleci:13
-    steps:
-      - checkout
-      - run: ./scripts/circleci/run.sh
+      - run:
+          name: Install exact dependencies
+          command: lmx_skip_postinstall=yes npm ci --no-audit --no-fund
+      - run:
+          name: Verify generated config and TypeScript
+          command: npm run compile:check
+      - run:
+          name: Build CommonJS and ESM
+          command: npm run build
+      - run:
+          name: Run tests
+          command: npm test
+
 workflows:
-  version: 2
   build_nodejs:
     jobs:
-      - build-node8
-      - build-node9
-      - build-node10
-      - build-node11
-      - build-node12
-      - build-node13
+      - build:
+          name: node-22-minimum
+          node-tag: "22.9"
+      - build:
+          name: node-24-lts
+          node-tag: "24.18"

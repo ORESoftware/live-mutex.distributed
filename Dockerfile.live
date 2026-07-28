@@ -1,16 +1,24 @@
 # Modern minimal Dockerfile used by the k8s live-smoke test only.
-# The repo's main Dockerfile pins node:12.3.1-alpine and is too old for
-# current dev work; this image is built locally for k8s live-smoke checks.
-# It is not pushed to docker hub from this branch.
-FROM node:20-alpine
+# This image is built locally for k8s live-smoke checks and is not pushed to
+# Docker Hub from this branch.
+FROM node:22-alpine AS dependencies
 WORKDIR /app
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
-RUN npm install --omit=dev --no-audit --no-fund --ignore-scripts
-COPY dist ./dist
-COPY assets ./assets
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm rebuild @oresoftware/f2e
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node dist ./dist
+COPY --chown=node:node assets ./assets
+COPY --chown=node:node .cli-flags.toml ./.cli-flags.toml
+COPY --chown=node:node package.json ./package.json
 ENV NODE_ENV=production \
     live_mutex_host=0.0.0.0 \
     live_mutex_port=6970 \
     lmx_in_docker=yes
+USER node
 EXPOSE 6970
 ENTRYPOINT ["node", "dist/lm-start-server.js"]

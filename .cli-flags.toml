@@ -24,8 +24,8 @@ help = "TCP port for the broker listener."
 env = "use_uds"
 aliases = ["uds"]
 type = "bool"
-true_aliases = ["t", "1", "yes"]
-false_aliases = ["f", "0", "no"]
+true_aliases = ["t", "1", "yes", "y", "on"]
+false_aliases = ["f", "0", "no", "n", "off"]
 help = "Listen on a Unix domain socket instead of TCP."
 
 [flags.uds-path]
@@ -50,8 +50,8 @@ help = "Timeout in milliseconds for finding a replacement lock holder."
 env = "live_mutex_no_delay"
 aliases = ["no-delay"]
 type = "bool"
-true_aliases = ["t", "1", "yes"]
-false_aliases = ["f", "0", "no"]
+true_aliases = ["t", "1", "yes", "y", "on"]
+false_aliases = ["f", "0", "no", "n", "off"]
 help = "Enable TCP_NODELAY on accepted broker sockets."
 
 [flags.http-port]
@@ -82,15 +82,9 @@ help = "HTTP request timeout in milliseconds."
 env = "LMX_HTTP_HTML_STATUS"
 aliases = ["status-html"]
 type = "bool"
-true_aliases = ["t", "1", "yes"]
-false_aliases = ["f", "0", "no"]
+true_aliases = ["t", "1", "yes", "y", "on"]
+false_aliases = ["f", "0", "no", "n", "off"]
 help = "Enable the human-friendly HTTP status page."
-
-[flags.admin-token]
-env = "LMX_ADMIN_TOKEN"
-aliases = ["http-admin-token", "status-admin-token"]
-type = "string"
-help = "Admin token required for HTTP /admin endpoints."
 
 [flags.log-level]
 env = "LMX_LOG_LEVEL"
@@ -102,8 +96,8 @@ help = "Broker log level: silent, error, warn, info, debug, or trace."
 env = "lmx_log_errors"
 aliases = ["broker-log-errors"]
 type = "bool"
-true_aliases = ["t", "1", "yes"]
-false_aliases = ["f", "0", "no"]
+true_aliases = ["t", "1", "yes", "y", "on"]
+false_aliases = ["f", "0", "no", "n", "off", "nope"]
 help = "Log process warnings and uncaught broker errors."
 
 [flags.json]
@@ -115,8 +109,8 @@ help = "Legacy JSON broker config object."
 [flags.lmx-debug]
 env = "lmx_debug"
 type = "bool"
-true_aliases = ["t", "1", "yes"]
-false_aliases = ["f", "0", "no"]
+true_aliases = ["t", "1", "yes", "y", "on"]
+false_aliases = ["f", "0", "no", "n", "off"]
 help = "Enable broker debug logging."
 
 [flags.otel-endpoint]

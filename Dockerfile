@@ -1,30 +1,38 @@
-FROM node:12.3.1-alpine
+# syntax=docker/dockerfile:1.6
 
-ENV live_mutex_host "0.0.0.0"
-ENV live_mutex_port 6970
-ENV lmx_in_docker='yes'
+FROM node:22-bookworm-slim AS build
 
-ENV FORCE_COLOR=1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++
 
-USER root
-RUN echo "user is: $USER"
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund \
+    && npm rebuild @oresoftware/f2e
 
-WORKDIR "/app"
+COPY tsconfig.json tsconfig.esm.json tsconfig.test.json ./
+COPY .cli-flags.toml ./
+COPY src ./src
+COPY scripts/add-esm-extensions.js scripts/fix-commonjs-import-meta.js scripts/sync-broker-cli-config.js ./scripts/
+RUN npm run build
 
-COPY package.json .
-COPY package-lock.json .
-COPY assets assets
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm rebuild @oresoftware/f2e
 
-RUN npm i
+FROM node:22-bookworm-slim AS runtime
 
-COPY . .
+WORKDIR /app
+ENV NODE_ENV=production \
+    live_mutex_host=0.0.0.0 \
+    live_mutex_port=6970 \
+    lmx_in_docker=yes \
+    bunion_producer_level=WARN
 
-ARG CACHEBUST=1
+COPY --from=build --chown=1000:1000 /app/node_modules ./node_modules
+COPY --from=build --chown=1000:1000 /app/dist ./dist
+COPY --from=build --chown=1000:1000 /app/.cli-flags.toml ./.cli-flags.toml
+COPY --from=build --chown=1000:1000 /app/package.json ./package.json
 
-ENV bunion_producer_level='WARN'
-
-EXPOSE 6970:6970
-
+USER 1000:1000
+EXPOSE 6970
 ENTRYPOINT ["node", "dist/lm-start-server.js"]
-CMD []
-

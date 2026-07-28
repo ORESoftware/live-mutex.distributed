@@ -1,0 +1,84 @@
+[parse]
+allow_unknown = false
+errors_env = "LMX_CLI_PARSE_ERRORS"
+unknown_options_env = "LMX_CLI_UNKNOWN_OPTIONS"
+
+[flags.host]
+env = "live_mutex_host"
+type = "string"
+
+[flags.port]
+env = "live_mutex_port"
+type = "string"
+
+[flags.use-uds]
+env = "use_uds"
+type = "bool"
+
+[flags.uds-path]
+env = "live_mutex_uds_path"
+type = "string"
+
+[flags.lock-expires-after]
+env = "live_mutex_lock_expires_after"
+type = "integer"
+
+[flags.timeout-to-find-new-lockholder]
+env = "live_mutex_timeout_to_find_new_lockholder"
+type = "integer"
+
+[flags.nodelay]
+env = "live_mutex_no_delay"
+type = "bool"
+
+[flags.http-port]
+env = "LMX_HTTP_PORT"
+type = "integer"
+
+[flags.http-host]
+env = "LMX_HTTP_HOST"
+type = "string"
+
+[flags.http-max-body-bytes]
+env = "LMX_HTTP_MAX_BODY_BYTES"
+type = "integer"
+
+[flags.http-request-timeout-ms]
+env = "LMX_HTTP_REQUEST_TIMEOUT_MS"
+type = "integer"
+
+[flags.http-html-status]
+env = "LMX_HTTP_HTML_STATUS"
+type = "bool"
+
+[flags.log-level]
+env = "LMX_LOG_LEVEL"
+type = "string"
+
+[flags.log-errors]
+env = "lmx_log_errors"
+type = "bool"
+
+[flags.json]
+env = "LMX_BROKER_CONFIG_JSON"
+type = "json"
+
+[flags.lmx-debug]
+env = "lmx_debug"
+type = "bool"
+
+[flags.otel-endpoint]
+env = "OTEL_EXPORTER_OTLP_ENDPOINT"
+type = "string"
+
+[flags.otel-service-name]
+env = "OTEL_SERVICE_NAME"
+type = "string"
+
+[flags.otel-resource-attributes]
+env = "OTEL_RESOURCE_ATTRIBUTES"
+type = "string"
+
+[flags.otel-log-level]
+env = "OTEL_LOG_LEVEL"
+type = "string"

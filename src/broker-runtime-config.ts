@@ -3,6 +3,11 @@
 import * as os from 'os';
 import * as path from 'path';
 import type {IBrokerOptsPartial} from './broker-1';
+import type {BrokerCliConfig} from './generated/broker-cli-config';
+import {
+    BROKER_CLI_BOOLEAN_ENV_KEYS,
+    BROKER_CLI_INTEGER_ENV_KEYS
+} from './generated/broker-cli-config-metadata';
 
 type EnvMap = {[key: string]: string | undefined};
 type CliEnvOverrides = {[key: string]: string};
@@ -10,32 +15,17 @@ type CliEnvOverrides = {[key: string]: string};
 export interface BrokerRuntimeEnv extends EnvMap {
     FLAGS2ENV_CONFIG?: string;
     LMX_ADMIN_TOKEN?: string;
-    LMX_BROKER_CONFIG_JSON?: string;
-    LMX_CLI_PARSE_ERRORS?: string;
-    LMX_CLI_UNKNOWN_OPTIONS?: string;
-    LMX_HTTP_HTML_STATUS?: string;
-    LMX_HTTP_HOST?: string;
-    LMX_HTTP_MAX_BODY_BYTES?: string;
-    LMX_HTTP_PORT?: string;
-    LMX_HTTP_REQUEST_TIMEOUT_MS?: string;
-    LMX_LOG_LEVEL?: string;
-    OTEL_EXPORTER_OTLP_ENDPOINT?: string;
-    OTEL_LOG_LEVEL?: string;
-    OTEL_RESOURCE_ATTRIBUTES?: string;
-    OTEL_SERVICE_NAME?: string;
     lmx_host?: string;
-    lmx_log_errors?: string;
     lmx_port?: string;
     LMX_HOST?: string;
     LMX_PORT?: string;
-    live_mutex_host?: string;
-    live_mutex_lock_expires_after?: string;
-    live_mutex_no_delay?: string;
-    live_mutex_port?: string;
-    live_mutex_timeout_to_find_new_lockholder?: string;
-    live_mutex_uds_path?: string;
-    lmx_debug?: string;
-    use_uds?: string;
+}
+
+export interface BrokerRuntimeValues extends BrokerCliConfig {
+    lmx_host?: string;
+    lmx_port?: string;
+    LMX_HOST?: string;
+    LMX_PORT?: string;
 }
 
 export interface BrokerRuntimeHttpConfig {
@@ -60,6 +50,7 @@ export interface BrokerRuntimeConfig {
     helpRequested: boolean;
     http: BrokerRuntimeHttpConfig;
     printHelp(target?: TableWriter): string;
+    values: BrokerRuntimeValues;
 }
 
 export interface LoadBrokerRuntimeConfigOpts {
@@ -69,13 +60,30 @@ export interface LoadBrokerRuntimeConfigOpts {
 }
 
 interface Flags2EnvParseResult {
+    readonly errors: unknown[];
+    readonly flags: {[key: string]: unknown};
     readonly isHelpMenu: boolean;
+    readonly unknownOptions: unknown[];
     printTable(target?: TableWriter): string;
-    [key: string]: unknown;
+}
+
+interface Flags2EnvJsonSchemaProperty {
+    type?: unknown;
+    'x-flags2env-type'?: unknown;
+}
+
+interface Flags2EnvJsonSchema {
+    properties: {[key: string]: Flags2EnvJsonSchemaProperty};
+    required: unknown[];
 }
 
 interface Flags2EnvModule {
-    parse(argv?: readonly unknown[], opts?: {configPath?: string}): Flags2EnvParseResult;
+    coerce<T extends object>(
+        values: Readonly<{[key: string]: unknown}>,
+        opts?: {configPath?: string}
+    ): T;
+    generateTypes(language: string, opts?: {configPath?: string; typeName?: string}): string;
+    parseStructured(argv?: readonly unknown[], opts?: {configPath?: string}): Flags2EnvParseResult;
 }
 
 export class BrokerRuntimeConfigError extends Error {
@@ -92,6 +100,8 @@ export const DEFAULT_LOCK_EXPIRES_AFTER = 5000;
 export const DEFAULT_TIMEOUT_TO_FIND_NEW_LOCKHOLDER = 4500;
 export const DEFAULT_CLI_FLAGS_CONFIG_PATH = path.resolve(__dirname, '..', '.cli-flags.toml');
 const VALID_LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug', 'trace'];
+const BOOLEAN_ENV_KEYS = new Set<string>(BROKER_CLI_BOOLEAN_ENV_KEYS);
+const INTEGER_ENV_KEYS = new Set<string>(BROKER_CLI_INTEGER_ENV_KEYS);
 
 const flags2Env = require('@oresoftware/f2e') as Flags2EnvModule;
 
@@ -103,25 +113,44 @@ export function loadBrokerRuntimeConfig(opts: LoadBrokerRuntimeConfigOpts = {}):
     const env = normalizeRuntimeEnv(stringEnvMap(opts.env || process.env));
     const argv = normalizeArgv(opts.argv || process.argv);
     const configPath = opts.configPath || env.FLAGS2ENV_CONFIG || DEFAULT_CLI_FLAGS_CONFIG_PATH;
-    const parsed = flags2Env.parse(argv, {configPath});
-    const cliEnv = normalizeRuntimeEnv(enumerableStringMap(parsed));
+    assertCompatibleCliSchema(configPath);
+    const parsed = flags2Env.parseStructured(argv, {configPath});
+    const cliEnv = normalizeRuntimeEnv(enumerableStringMap(parsed.flags));
     const mergedEnv = {...env, ...cliEnv} as BrokerRuntimeEnv;
-    const parseErrors = readJsonStringArray(mergedEnv.LMX_CLI_PARSE_ERRORS, 'LMX_CLI_PARSE_ERRORS');
-    const unknownOptions = readJsonStringArray(mergedEnv.LMX_CLI_UNKNOWN_OPTIONS, 'LMX_CLI_UNKNOWN_OPTIONS');
+    const parseErrors = parsed.errors.map(String);
+    const unknownOptions = parsed.unknownOptions.map(String);
 
     if (!parsed.isHelpMenu && parseErrors.length > 0) {
         throw new BrokerRuntimeConfigError(`Could not parse broker CLI flags: ${parseErrors.join('; ')}`);
     }
 
     if (!parsed.isHelpMenu && unknownOptions.length > 0) {
-        throw new BrokerRuntimeConfigError(`Unknown broker CLI flag(s): ${unknownOptions.join(', ')}`);
+        throw new BrokerRuntimeConfigError(
+            `Unknown broker CLI flag(s): ${unknownOptions.map(redactUnknownOption).join(', ')}`
+        );
     }
 
-    validateRuntimeEnv(mergedEnv);
+    const mergedCoercionInput = coercionInputFrom(mergedEnv);
+    const cliCoercionInput = coercionInputFrom(cliEnv);
+    if (parsed.isHelpMenu) {
+        delete mergedCoercionInput.LMX_CLI_PARSE_ERRORS;
+        delete cliCoercionInput.LMX_CLI_PARSE_ERRORS;
+    }
+    const schemaValues = coerceCliConfig(mergedCoercionInput, configPath);
+    const cliValues = coerceCliConfig(cliCoercionInput, configPath);
+    const values: BrokerRuntimeValues = {
+        ...schemaValues,
+        lmx_host: mergedEnv.lmx_host,
+        lmx_port: mergedEnv.lmx_port,
+        LMX_HOST: mergedEnv.LMX_HOST,
+        LMX_PORT: mergedEnv.LMX_PORT
+    };
 
-    const broker = brokerConfigFromEnv(mergedEnv);
-    applyBrokerJsonConfig(broker, mergedEnv.LMX_BROKER_CONFIG_JSON);
-    applyDirectCliBrokerOverrides(broker, cliEnv);
+    validateRuntimeValues(values);
+
+    const broker = brokerConfigFromValues(values);
+    applyBrokerJsonConfig(broker, values.LMX_BROKER_CONFIG_JSON);
+    applyDirectCliBrokerOverrides(broker, cliValues);
 
     return {
         broker,
@@ -129,9 +158,186 @@ export function loadBrokerRuntimeConfig(opts: LoadBrokerRuntimeConfigOpts = {}):
         configPath,
         env: mergedEnv,
         helpRequested: parsed.isHelpMenu,
-        http: httpConfigFromEnv(mergedEnv),
-        printHelp: parsed.printTable.bind(parsed)
+        http: httpConfigFromValues(values),
+        printHelp: parsed.printTable.bind(parsed),
+        values
     };
+}
+
+function assertCompatibleCliSchema(configPath: string): void {
+    // Custom files may change flag names, aliases, help text, and parser channel names.
+    // The generated runtime boundary still requires the canonical env keys/types,
+    // reported unknown options, and no defaults so customizations cannot change
+    // precedence or value shape.
+    const selectedSchema = readGeneratedJsonSchema(configPath);
+    assertSchemaHasNoDefaults(selectedSchema, configPath);
+    assertUnknownOptionsReported(configPath);
+
+    if (path.resolve(configPath) === path.resolve(DEFAULT_CLI_FLAGS_CONFIG_PATH)) {
+        return;
+    }
+
+    const canonicalSchema = readGeneratedJsonSchema(DEFAULT_CLI_FLAGS_CONFIG_PATH);
+    assertSchemaHasNoDefaults(canonicalSchema, DEFAULT_CLI_FLAGS_CONFIG_PATH);
+
+    const selectedKeys = Object.keys(selectedSchema.properties).sort();
+    const canonicalKeys = Object.keys(canonicalSchema.properties).sort();
+    const missingKeys = canonicalKeys.filter(key => !hasOwn(selectedSchema.properties, key));
+    const extraKeys = selectedKeys.filter(key => !hasOwn(canonicalSchema.properties, key));
+
+    if (missingKeys.length > 0 || extraKeys.length > 0) {
+        const details = [
+            missingKeys.length > 0 ? `missing: ${missingKeys.join(', ')}` : '',
+            extraKeys.length > 0 ? `extra: ${extraKeys.join(', ')}` : ''
+        ].filter(Boolean).join('; ');
+        throw new BrokerRuntimeConfigError(
+            `Broker CLI config "${configPath}" does not match the generated broker interface (${details}).`
+        );
+    }
+
+    const mismatchedTypes = canonicalKeys.filter(key => {
+        return schemaPropertyType(selectedSchema.properties[key]) !==
+            schemaPropertyType(canonicalSchema.properties[key]);
+    });
+
+    if (mismatchedTypes.length > 0) {
+        const details = mismatchedTypes.map(key => {
+            const expected = schemaPropertyType(canonicalSchema.properties[key]);
+            const actual = schemaPropertyType(selectedSchema.properties[key]);
+            return `${key} (expected ${expected}, got ${actual})`;
+        }).join(', ');
+        throw new BrokerRuntimeConfigError(
+            `Broker CLI config "${configPath}" has types that do not match the generated broker interface: ${details}.`
+        );
+    }
+}
+
+function assertUnknownOptionsReported(configPath: string): void {
+    const probe = '--__lmx_internal_unknown_option_probe_7f3c9d__';
+    let parsed: Flags2EnvParseResult;
+
+    try {
+        parsed = flags2Env.parseStructured(['broker-runtime-config', probe], {configPath});
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BrokerRuntimeConfigError(
+            `Could not verify unknown-option handling for broker CLI config "${configPath}": ${message}`
+        );
+    }
+
+    if (parsed.unknownOptions.map(String).indexOf(probe) < 0) {
+        throw new BrokerRuntimeConfigError(
+            `Broker CLI config "${configPath}" must report unknown options; ` +
+            'set [parse].allow_unknown = false.'
+        );
+    }
+}
+
+function readGeneratedJsonSchema(configPath: string): Flags2EnvJsonSchema {
+    let rawSchema: string;
+
+    try {
+        rawSchema = flags2Env.generateTypes('json-schema', {configPath});
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BrokerRuntimeConfigError(
+            `Could not inspect broker CLI config "${configPath}": ${message}`
+        );
+    }
+
+    let value: unknown;
+
+    try {
+        value = JSON.parse(rawSchema);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BrokerRuntimeConfigError(
+            `flags2env generated invalid JSON Schema for "${configPath}": ${message}`
+        );
+    }
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new BrokerRuntimeConfigError(
+            `flags2env generated a non-object JSON Schema for "${configPath}".`
+        );
+    }
+
+    const schema = value as Partial<Flags2EnvJsonSchema>;
+    if (!schema.properties || typeof schema.properties !== 'object' ||
+        Array.isArray(schema.properties) || !Array.isArray(schema.required)) {
+        throw new BrokerRuntimeConfigError(
+            `flags2env generated an incomplete JSON Schema for "${configPath}".`
+        );
+    }
+
+    return schema as Flags2EnvJsonSchema;
+}
+
+function assertSchemaHasNoDefaults(schema: Flags2EnvJsonSchema, configPath: string): void {
+    const defaultedKeys = schema.required.map(String);
+
+    if (defaultedKeys.length > 0) {
+        throw new BrokerRuntimeConfigError(
+            `Broker CLI config "${configPath}" defines schema defaults for: ${defaultedKeys.join(', ')}. ` +
+            'Defaults are unsupported because they can override environment or JSON values without an explicit CLI flag.'
+        );
+    }
+}
+
+function schemaPropertyType(property: Flags2EnvJsonSchemaProperty): string {
+    const flags2EnvType = property['x-flags2env-type'];
+    if (typeof flags2EnvType === 'string' && flags2EnvType) {
+        return flags2EnvType;
+    }
+
+    return JSON.stringify(property.type);
+}
+
+function coercionInputFrom(values: Readonly<{[key: string]: unknown}>): {[key: string]: unknown} {
+    const result: {[key: string]: unknown} = {};
+
+    for (const key of Object.keys(values)) {
+        const value = values[key];
+        if (value === '') {
+            continue;
+        }
+        if (typeof value === 'string' && BOOLEAN_ENV_KEYS.has(key)) {
+            result[key] = normalizedBooleanCoercionValue(key, value);
+        } else if (typeof value === 'string' && INTEGER_ENV_KEYS.has(key)) {
+            result[key] = value.trim();
+        } else {
+            result[key] = value;
+        }
+    }
+
+    return result;
+}
+
+function normalizedBooleanCoercionValue(key: string, value: string): boolean | string {
+    const normalized = value.trim().toLowerCase();
+
+    if (['true', 't', '1', 'yes', 'y', 'on'].indexOf(normalized) >= 0) {
+        return true;
+    }
+
+    if (['false', 'f', '0', 'no', 'n', 'off'].indexOf(normalized) >= 0 ||
+        (key === 'lmx_log_errors' && normalized === 'nope')) {
+        return false;
+    }
+
+    return normalized;
+}
+
+function coerceCliConfig(
+    values: Readonly<{[key: string]: unknown}>,
+    configPath: string
+): BrokerCliConfig {
+    try {
+        return flags2Env.coerce<BrokerCliConfig>(values, {configPath});
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new BrokerRuntimeConfigError(`Could not coerce broker configuration: ${message}`);
+    }
 }
 
 function enumerableStringMap(value: {[key: string]: unknown}): CliEnvOverrides {
@@ -174,7 +380,7 @@ function normalizeRuntimeEnv<T extends EnvMap>(env: T): T {
     return result as T;
 }
 
-function validateRuntimeEnv(env: BrokerRuntimeEnv): void {
+function validateRuntimeValues(env: BrokerRuntimeValues): void {
     if (hasEnvValue(env.LMX_LOG_LEVEL)) {
         const level = env.LMX_LOG_LEVEL.trim().toLowerCase();
         if (VALID_LOG_LEVELS.indexOf(level) < 0) {
@@ -195,14 +401,14 @@ function normalizeArgv(argv: readonly unknown[]): string[] {
     return items;
 }
 
-function brokerConfigFromEnv(env: BrokerRuntimeEnv): IBrokerOptsPartial {
+function brokerConfigFromValues(env: BrokerRuntimeValues): IBrokerOptsPartial {
     const broker: IBrokerOptsPartial = {
-        host: readString(firstEnv(env, ['live_mutex_host', 'LMX_HOST', 'lmx_host']), 'live_mutex_host') ||
+        host: readString(firstRuntimeValue(env.live_mutex_host, env.LMX_HOST, env.lmx_host), 'live_mutex_host') ||
             DEFAULT_BROKER_HOST,
         lockExpiresAfter: readInteger(env.live_mutex_lock_expires_after, 'live_mutex_lock_expires_after',
             DEFAULT_LOCK_EXPIRES_AFTER, 21, 3999999),
         noDelay: readBoolean(env.live_mutex_no_delay, 'live_mutex_no_delay', true),
-        port: readInteger(firstEnv(env, ['live_mutex_port', 'LMX_PORT', 'lmx_port']), 'live_mutex_port',
+        port: readInteger(firstRuntimeValue(env.live_mutex_port, env.LMX_PORT, env.lmx_port), 'live_mutex_port',
             DEFAULT_BROKER_PORT, 1025, 49151),
         timeoutToFindNewLockholder: readInteger(env.live_mutex_timeout_to_find_new_lockholder,
             'live_mutex_timeout_to_find_new_lockholder', DEFAULT_TIMEOUT_TO_FIND_NEW_LOCKHOLDER, 21, 3999999)
@@ -220,18 +426,20 @@ function brokerConfigFromEnv(env: BrokerRuntimeEnv): IBrokerOptsPartial {
     return broker;
 }
 
-function applyBrokerJsonConfig(broker: IBrokerOptsPartial, raw: string | undefined): void {
-    if (!raw) {
+function applyBrokerJsonConfig(broker: IBrokerOptsPartial, raw: unknown): void {
+    if (!hasRuntimeValue(raw)) {
         return;
     }
 
-    let parsed: unknown;
+    let parsed: unknown = raw;
 
-    try {
-        parsed = JSON.parse(raw);
-    } catch (err) {
-        const e = err as Error;
-        throw new BrokerRuntimeConfigError(`LMX_BROKER_CONFIG_JSON could not be parsed as JSON: ${e.message}`);
+    if (typeof raw === 'string') {
+        try {
+            parsed = JSON.parse(raw);
+        } catch (err) {
+            const e = err as Error;
+            throw new BrokerRuntimeConfigError(`LMX_BROKER_CONFIG_JSON could not be parsed as JSON: ${e.message}`);
+        }
     }
 
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -272,7 +480,7 @@ function applyBrokerJsonConfig(broker: IBrokerOptsPartial, raw: string | undefin
     }
 }
 
-function applyDirectCliBrokerOverrides(broker: IBrokerOptsPartial, cliEnv: CliEnvOverrides): void {
+function applyDirectCliBrokerOverrides(broker: IBrokerOptsPartial, cliEnv: BrokerCliConfig): void {
     if (hasOwn(cliEnv, 'live_mutex_host')) {
         broker.host = readStringValue(cliEnv.live_mutex_host, 'live_mutex_host');
     }
@@ -308,7 +516,7 @@ function applyDirectCliBrokerOverrides(broker: IBrokerOptsPartial, cliEnv: CliEn
     }
 }
 
-function httpConfigFromEnv(env: BrokerRuntimeEnv): BrokerRuntimeHttpConfig {
+function httpConfigFromValues(env: BrokerRuntimeValues): BrokerRuntimeHttpConfig {
     const host = readString(env.LMX_HTTP_HOST, 'LMX_HTTP_HOST') || DEFAULT_HTTP_HOST;
     const maxBodyBytes = readOptionalInteger(env.LMX_HTTP_MAX_BODY_BYTES, 'LMX_HTTP_MAX_BODY_BYTES',
         1, 10 * 1024 * 1024);
@@ -316,7 +524,7 @@ function httpConfigFromEnv(env: BrokerRuntimeEnv): BrokerRuntimeHttpConfig {
         1, 24 * 60 * 60 * 1000);
     const enableHtmlStatus = readBoolean(env.LMX_HTTP_HTML_STATUS, 'LMX_HTTP_HTML_STATUS', true);
 
-    if (!hasEnvValue(env.LMX_HTTP_PORT)) {
+    if (!hasRuntimeValue(env.LMX_HTTP_PORT)) {
         return {enableHtmlStatus, enabled: false, host, maxBodyBytes, requestTimeoutMs};
     }
 
@@ -330,8 +538,8 @@ function httpConfigFromEnv(env: BrokerRuntimeEnv): BrokerRuntimeHttpConfig {
     };
 }
 
-function readString(value: string | undefined, name: string): string | undefined {
-    if (!hasEnvValue(value)) {
+function readString(value: unknown, name: string): string | undefined {
+    if (!hasRuntimeValue(value)) {
         return undefined;
     }
 
@@ -347,13 +555,13 @@ function readStringValue(value: unknown, name: string): string {
 }
 
 function readInteger(
-    value: string | undefined,
+    value: unknown,
     name: string,
     defaultValue: number | undefined,
     min: number,
     max: number
 ): number {
-    if (!hasEnvValue(value)) {
+    if (!hasRuntimeValue(value)) {
         if (defaultValue === undefined) {
             throw new BrokerRuntimeConfigError(`${name} must be set.`);
         }
@@ -363,8 +571,8 @@ function readInteger(
     return readIntegerValue(value, name, min, max);
 }
 
-function readOptionalInteger(value: string | undefined, name: string, min: number, max: number): number | undefined {
-    if (!hasEnvValue(value)) {
+function readOptionalInteger(value: unknown, name: string, min: number, max: number): number | undefined {
+    if (!hasRuntimeValue(value)) {
         return undefined;
     }
 
@@ -389,13 +597,13 @@ function readIntegerValue(value: unknown, name: string, min: number, max: number
     return n;
 }
 
-function readBoolean(value: string | undefined, name: string, defaultValue: boolean): boolean {
+function readBoolean(value: unknown, name: string, defaultValue: boolean): boolean {
     const parsed = readOptionalBoolean(value, name);
     return parsed === undefined ? defaultValue : parsed;
 }
 
-function readOptionalBoolean(value: string | undefined, name: string): boolean | undefined {
-    if (!hasEnvValue(value)) {
+function readOptionalBoolean(value: unknown, name: string): boolean | undefined {
+    if (!hasRuntimeValue(value)) {
         return undefined;
     }
 
@@ -432,42 +640,35 @@ function readLegacyLogErrorsValue(value: unknown): boolean {
     return readBooleanValue(value, 'lmx_log_errors');
 }
 
-function readJsonStringArray(value: string | undefined, name: string): string[] {
-    if (!hasEnvValue(value)) {
-        return [];
-    }
-
-    let parsed: unknown;
-
-    try {
-        parsed = JSON.parse(value);
-    } catch (err) {
-        const e = err as Error;
-        throw new BrokerRuntimeConfigError(`${name} could not be parsed as JSON: ${e.message}`);
-    }
-
-    if (!Array.isArray(parsed)) {
-        throw new BrokerRuntimeConfigError(`${name} must be a JSON array.`);
-    }
-
-    return parsed.map((item: unknown) => String(item));
-}
-
 function hasEnvValue(value: string | undefined): value is string {
     return value !== undefined && value !== '';
+}
+
+function hasRuntimeValue(value: unknown): boolean {
+    return value !== undefined && value !== null && value !== '';
 }
 
 function hasOwn(obj: object, key: string): boolean {
     return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
-function firstEnv(env: BrokerRuntimeEnv, keys: string[]): string | undefined {
-    for (const key of keys) {
-        const value = env[key];
-        if (hasEnvValue(value)) {
+function firstRuntimeValue(...values: unknown[]): unknown {
+    for (const value of values) {
+        if (hasRuntimeValue(value)) {
             return value;
         }
     }
 
     return undefined;
+}
+
+function redactUnknownOption(option: string): string {
+    const separator = option.indexOf('=');
+    const optionName = separator < 0 ? option : option.slice(0, separator);
+
+    if (/^-[^-].+/.test(optionName)) {
+        return optionName.slice(0, 2);
+    }
+
+    return optionName;
 }

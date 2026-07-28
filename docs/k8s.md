@@ -53,18 +53,20 @@ docker pull oresoftware/live-mutex-broker:latest
 
 This is what the [getting-started-with-docker](./getting-started-with-docker.md)
 guide uses. The image runs `node dist/lm-start-server.js` and listens on
-TCP `:6970`. Note that the bundled `Dockerfile` in this repo is several
-Node majors behind (`node:12.3.1-alpine`); for a production deploy on
-Node 22 you usually want option 2 below or to roll your own image.
+TCP `:6970`. The bundled `Dockerfile` and `Dockerfile.image` now use
+multi-stage Node 22 builds and compile the exact pinned flags2env native
+addon in the same libc environment as the runtime.
 
 ### 2. Build at pod start from a checkout (what we run)
 
 Mount this repo (or the cluster's checkout of it) at a host path,
-let the pod run `npm ci && npm run build` at boot, then `exec node
-dist/lm-start-server.js`. This is the pattern in the deployment
-manifest below. Cold-start adds 10-30 s for the install + tsc, which
-is acceptable for an internal broker that restarts rarely. The
-benefit is that you stay on a current Node base image
+let the pod install the native build toolchain, run `npm ci`, rebuild
+the pinned flags2env addon, and run `npm run build` at boot, then
+`exec node dist/lm-start-server.js`. This is the pattern in the
+deployment manifest below. Cold-start includes the system-package
+install plus npm install and tsc, so use the prebuilt-image variant
+below when startup latency matters. The benefit of the build-at-start
+variant is that you stay on a current Node base image
 (`node:22-bookworm-slim`) without maintaining a separate image
 pipeline for the broker.
 
@@ -75,18 +77,22 @@ multi-stage image:
 # build stage
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts && npm rebuild @oresoftware/f2e
 COPY . .
-RUN npm run build && npm prune --omit=dev
+RUN npm run build
+RUN npm ci --omit=dev --ignore-scripts && npm rebuild @oresoftware/f2e
 
 # runtime stage
 FROM node:22-bookworm-slim
 WORKDIR /app
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/package.json ./package.json
-USER node
+COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
+COPY --chown=1000:1000 --from=build /app/dist ./dist
+COPY --chown=1000:1000 --from=build /app/.cli-flags.toml ./.cli-flags.toml
+COPY --chown=1000:1000 --from=build /app/package.json ./package.json
+USER 1000:1000
 EXPOSE 6970 6971
 CMD ["node", "dist/lm-start-server.js"]
 ```
@@ -135,10 +141,17 @@ spec:
             - |
               set -euo pipefail
               cd /opt/live-mutex
+              # flags2env has a native addon. The slim base image does
+              # not include its compiler toolchain, so install that
+              # toolchain before the deterministic npm install.
+              apt-get update
+              apt-get install -y --no-install-recommends python3 make g++
               # `npm ci` reproduces an exact build from package-lock.json;
               # `--ignore-scripts` keeps untrusted pre/post-install hooks
-              # from running inside the cluster.
+              # from running inside the cluster. Rebuild only the exact
+              # pinned native addon that the generated-config check needs.
               npm ci --ignore-scripts
+              npm rebuild @oresoftware/f2e
               npm run build
               # Surface the running version so a `kubectl logs` tells
               # us *which* commit landed on this pod.
