@@ -1,9 +1,13 @@
 node_modules
-src
 lib
-scripts
 docs
+test
+clients
+.nyc_output
+coverage
 .idea
+.vscode
 .git
 .circleci
 .r2g
+*.log

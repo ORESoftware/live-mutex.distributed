@@ -1,0 +1,11 @@
+[parse]
+allow_unknown = false
+errors_env = "LMX_CLI_PARSE_ERRORS"
+unknown_options_env = "LMX_CLI_UNKNOWN_OPTIONS"
+
+[flags.port]
+env = "live_mutex_port"
+aliases = ["port"]
+type = "integer"
+default = 7999
+help = "Fixture default that must never masquerade as an explicit CLI override."

@@ -6,12 +6,12 @@
  * The broker exposes `GET /admin/otel` and `POST /admin/otel` on its
  * HTTP listener. Both require an `x-admin-token` (or
  * `Authorization: Bearer …`) header whose value matches the shared
- * secret. The default secret is the literal string baked in at request
- * time (`all-dogs-go-to-heaven`); operators can override via
- * `LMX_ADMIN_TOKEN`.
+ * secret configured through `LMX_ADMIN_TOKEN`. Without that variable,
+ * the admin surface is disabled.
  *
  * Asserts:
- *   1. Unauthenticated GET/POST is rejected with 401.
+ *   1. An unconfigured admin surface returns 403; once configured,
+ *      unauthenticated GET/POST is rejected with 401.
  *   2. Authenticated GET returns the current `enabled` boolean.
  *   3. Authenticated POST flips the flag and the next GET reflects the
  *      new state. The response includes the `previous` value for audit
@@ -85,6 +85,11 @@ function httpJson(
 }
 
 async function main() {
+    const TOKEN = 'all-dogs-go-to-heaven';
+    const CUSTOM_TOKEN = 'custom-token-xyz';
+    const previousAdminToken = process.env.LMX_ADMIN_TOKEN;
+    delete process.env.LMX_ADMIN_TOKEN;
+
     // Reset the kill-switch to a known initial state. A previous test
     // file may have flipped it; treat each run as a fresh slate.
     setOtelEnabled(false);
@@ -97,7 +102,19 @@ async function main() {
     if (!port) fail('HTTP server did not bind a port');
 
     try {
-        // [1] Unauthenticated requests are rejected.
+        // [1] An unconfigured admin surface is disabled.
+        {
+            const get = await httpJson(port, 'GET', '/admin/otel', {});
+            assert.strictEqual(get.status, 403,
+                'GET should be disabled when LMX_ADMIN_TOKEN is unset');
+            const post = await httpJson(port, 'POST', '/admin/otel', {}, {enabled: true});
+            assert.strictEqual(post.status, 403,
+                'POST should be disabled when LMX_ADMIN_TOKEN is unset');
+            ok('unconfigured /admin/otel is disabled with 403');
+        }
+        process.env.LMX_ADMIN_TOKEN = TOKEN;
+
+        // Once configured, unauthenticated requests are rejected.
         {
             const get = await httpJson(port, 'GET', '/admin/otel', {});
             assert.strictEqual(get.status, 401, 'GET without token should be 401');
@@ -109,7 +126,7 @@ async function main() {
         // [2] Authenticated GET returns the current state.
         {
             const get = await httpJson(port, 'GET', '/admin/otel', {
-                'x-admin-token': 'all-dogs-go-to-heaven',
+                'x-admin-token': TOKEN,
             });
             assert.strictEqual(get.status, 200);
             assert.strictEqual(typeof get.body.enabled, 'boolean');
@@ -123,7 +140,7 @@ async function main() {
                 port,
                 'POST',
                 '/admin/otel',
-                {'x-admin-token': 'all-dogs-go-to-heaven'},
+                {'x-admin-token': TOKEN},
                 {enabled: true},
             );
             assert.strictEqual(on.status, 200);
@@ -135,7 +152,7 @@ async function main() {
                 port,
                 'POST',
                 '/admin/otel',
-                {'x-admin-token': 'all-dogs-go-to-heaven'},
+                {'x-admin-token': TOKEN},
                 {enabled: false},
             );
             assert.strictEqual(off.status, 200);
@@ -148,7 +165,7 @@ async function main() {
         // [3b] Authorization: Bearer is also accepted.
         {
             const r = await httpJson(port, 'GET', '/admin/otel', {
-                authorization: 'Bearer all-dogs-go-to-heaven',
+                authorization: `Bearer ${TOKEN}`,
             });
             assert.strictEqual(r.status, 200);
             ok('Authorization: Bearer header is accepted');
@@ -160,7 +177,7 @@ async function main() {
                 port,
                 'POST',
                 '/admin/otel',
-                {'x-admin-token': 'all-dogs-go-to-heaven'},
+                {'x-admin-token': TOKEN},
                 {},
             );
             assert.strictEqual(missing.status, 400);
@@ -168,7 +185,7 @@ async function main() {
                 port,
                 'POST',
                 '/admin/otel',
-                {'x-admin-token': 'all-dogs-go-to-heaven'},
+                {'x-admin-token': TOKEN},
                 {enabled: 'on'},
             );
             assert.strictEqual(wrongType.status, 400);
@@ -178,7 +195,7 @@ async function main() {
         // [5] Method other than GET/POST → 405.
         {
             const bad = await httpJson(port, 'GET' as any, '/admin/otel', {
-                'x-admin-token': 'all-dogs-go-to-heaven',
+                'x-admin-token': TOKEN,
             });
             // sanity: GET works
             assert.strictEqual(bad.status, 200);
@@ -190,21 +207,26 @@ async function main() {
 
         // [6] Custom env-overridden token works.
         {
-            process.env.LMX_ADMIN_TOKEN = 'custom-token-xyz';
+            process.env.LMX_ADMIN_TOKEN = CUSTOM_TOKEN;
             const wrong = await httpJson(port, 'GET', '/admin/otel', {
-                'x-admin-token': 'all-dogs-go-to-heaven',
+                'x-admin-token': TOKEN,
             });
             assert.strictEqual(wrong.status, 401, 'old token should be rejected when env overrides');
             const right = await httpJson(port, 'GET', '/admin/otel', {
-                'x-admin-token': 'custom-token-xyz',
+                'x-admin-token': CUSTOM_TOKEN,
             });
             assert.strictEqual(right.status, 200);
-            delete process.env.LMX_ADMIN_TOKEN;
+            process.env.LMX_ADMIN_TOKEN = TOKEN;
             ok('LMX_ADMIN_TOKEN env override is honored');
         }
 
         console.log('\n\u2705 admin-otel-toggle-test: all checks passed');
     } finally {
+        if (previousAdminToken === undefined) {
+            delete process.env.LMX_ADMIN_TOKEN;
+        } else {
+            process.env.LMX_ADMIN_TOKEN = previousAdminToken;
+        }
         await httpServer.stop();
         broker.close(null);
     }

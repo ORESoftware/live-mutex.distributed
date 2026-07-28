@@ -42,7 +42,7 @@
 
 >
 > Tested on *nix and MacOS - (probably will work on Windows, but not tested on Windows). <br>
-> Tested and proven on Node.js versions >= 8.0.0.
+> Supported on Node.js >= 22.9; CI covers the Node 22 and Node 24 LTS release lines.
 >
 
 # Quick Start
@@ -1015,4 +1015,3 @@ it will likely not be possible, but that's ok, since you can just use TCP/ports.
  ```
 
 </details>
-

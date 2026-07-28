@@ -4,9 +4,10 @@ This guide explains how to compile Live-Mutex source code and tests.
 
 ## Prerequisites
 
-- Node.js >= 8.0.0
+- Node.js >= 22.9
 - TypeScript >= 5.9.3
 - npm or yarn
+- Python 3, Make, and a C/C++ compiler for the flags2env native addon
 
 ## Installation
 
@@ -14,7 +15,8 @@ This guide explains how to compile Live-Mutex source code and tests.
 npm install
 ```
 
-This will install all dependencies including TypeScript.
+This installs TypeScript and compiles the pinned flags2env native addon. The
+broker Dockerfiles install the same native build prerequisites explicitly.
 
 ## Compilation
 

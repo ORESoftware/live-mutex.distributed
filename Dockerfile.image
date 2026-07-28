@@ -3,19 +3,14 @@
 # Modern multi-stage build for the patched `live-mutex` broker (the one
 # deployed as `dd-live-mutex-submodule`).
 #
-# The legacy `Dockerfile` at the root of this repo is pinned to
-# `node:12.3.1-alpine` and a single-stage layout that never compiled
-# the TS sources end-to-end inside the image; downstream consumers
-# (e.g. the EC2 cluster running `dd-live-mutex-submodule`) had to
-# `git submodule update` on the host and run `npm ci && npm run build`
-# at pod start, which is brittle and adds 10–30s to every cold start.
+# This deployment-specific variant follows the same Node 22,
+# source-to-dist build as the root Dockerfile and additionally enables
+# the broker HTTP front-end on port 6971:
 #
-# This Dockerfile lifts that into a published image:
-#
-#   1. Stage `build` runs `npm ci --ignore-scripts` against the full
-#      dependency tree, then `npm run build` to produce `dist/`. We
-#      then re-install with `--omit=dev` so the runtime layer ships
-#      production deps only.
+#   1. Stage `build` installs the full dependency tree (including the
+#      flags-2-env native addon), then runs `npm run build` to produce
+#      `dist/`. We then re-install with `--omit=dev` so the runtime layer
+#      ships production deps only.
 #
 #   2. Stage `runtime` is a fresh `node:22-bookworm-slim` with just the
 #      built `dist/` and `node_modules/` and a sane default env. The
@@ -36,22 +31,29 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
+# flags-2-env is an exact-SHA native dependency. Build it in the same glibc
+# environment used by the runtime image so its Node addon is ABI-compatible.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++
+
 # Cache `npm ci` separately from src changes.
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts --no-audit --no-fund \
+    && npm rebuild @oresoftware/f2e
 
 # Bring in just what `npm run build` needs (TS sources + tsconfigs +
-# the two post-compile fix-up scripts referenced by the `build` script
-# in package.json).
+# generated-interface drift checking + post-compile fix-up scripts).
 COPY tsconfig.json tsconfig.esm.json tsconfig.test.json ./
+COPY .cli-flags.toml ./
 COPY src ./src
-COPY scripts/add-esm-extensions.js scripts/fix-commonjs-import-meta.js ./scripts/
+COPY scripts/add-esm-extensions.js scripts/fix-commonjs-import-meta.js scripts/sync-broker-cli-config.js ./scripts/
 
 RUN npm run build
 
 # Re-install with production deps only — devDependencies (typescript,
 # @types/*, suman, …) are not needed at runtime.
-RUN npm ci --omit=dev --ignore-scripts
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm rebuild @oresoftware/f2e
 
 FROM node:22-bookworm-slim AS runtime
 
@@ -77,6 +79,7 @@ USER 1000:1000
 
 COPY --from=build --chown=1000:1000 /app/node_modules ./node_modules
 COPY --from=build --chown=1000:1000 /app/dist          ./dist
+COPY --from=build --chown=1000:1000 /app/.cli-flags.toml ./.cli-flags.toml
 COPY --from=build --chown=1000:1000 /app/package.json  ./package.json
 
 EXPOSE 6970 6971
