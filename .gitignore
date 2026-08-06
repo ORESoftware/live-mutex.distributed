@@ -26,3 +26,7 @@ yarn.lock
 
 ### matching
 !dist/README.md
+tmp
+temp
+tmp/worktrees
+temp/worktrees
