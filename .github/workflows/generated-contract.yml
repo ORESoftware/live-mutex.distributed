@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  contract:
-    name: Generated policy + runtime contract
+  check:
+    name: Runtime generated contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

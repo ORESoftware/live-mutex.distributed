@@ -1,0 +1,48 @@
+# Verify container sources through the shared immutable ORESoftware image workflow.
+# Publication remains disabled here until repository-specific registry readiness is reviewed.
+name: images
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/images.yml"
+      - "Dockerfile"
+      - "Dockerfile.*.dkf"
+      - "Containerfile"
+      - "src/**"
+      - "Cargo.*"
+      - "package*.json"
+      - "pubspec.*"
+      - "go.*"
+      - "gleam.toml"
+      - "manifest.toml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/images.yml"
+      - "Dockerfile"
+      - "Dockerfile.*.dkf"
+      - "Containerfile"
+      - "src/**"
+      - "Cargo.*"
+      - "package*.json"
+      - "pubspec.*"
+      - "go.*"
+      - "gleam.toml"
+      - "manifest.toml"
+  workflow_dispatch:
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    permissions:
+      contents: read
+    uses: ORESoftware/ores-gha-workflows/.github/workflows/container-images.yml@aee40347aac0b4a23fb0da38326540228741975c
+    with:
+      image-name: oresoftware/live-mutex.distributed
+      gcp-project: ""
+      dockerhub-namespace: oresoftware
+      push: false

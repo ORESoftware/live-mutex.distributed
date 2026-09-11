@@ -54,3 +54,15 @@ you are committing a regeneration, the pre-commit guard needs to be told so:
 ```sh
 REGEN=1 git commit -m "Regenerate clients from the updated route map"
 ```
+
+## Runtime contract (not just compile-time)
+
+JSON Schema is a **cross-check**, not always the primary generator input. The checker
+validates fixtures/examples against Draft 2020-12 at runtime (valid must pass,
+invalid must fail) and compares schema keys to `.cli-flags.toml` env names or
+route-map keys when those exist.
+
+```sh
+python3 scripts/check-generated-contract.py --freeze --require-readonly
+```
+
